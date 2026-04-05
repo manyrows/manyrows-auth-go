@@ -10,33 +10,33 @@ import (
 
 type contextKey string
 
-const accountIDKey contextKey = "accountID"
+const userIDKey contextKey = "userID"
 
 // meResponse is the relevant subset of the /a/me response.
 type meResponse struct {
-	WorkspaceAccount struct {
+	User struct {
 		ID string `json:"id"`
-	} `json:"workspaceAccount"`
+	} `json:"user"`
 }
 
-// AccountIDFromContext extracts the manyrows workspace account ID from the request context.
-func AccountIDFromContext(ctx context.Context) (string, bool) {
-	id, ok := ctx.Value(accountIDKey).(string)
+// UserIDFromContext extracts the manyrows user ID from the request context.
+func UserIDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(userIDKey).(string)
 	return id, ok && id != ""
 }
 
-// MustAccountID extracts the account ID from context, panicking if absent.
+// MustUserID extracts the user ID from context, panicking if absent.
 // Only use in handlers behind auth Middleware, which guarantees the ID is set.
-func MustAccountID(ctx context.Context) string {
-	id, ok := AccountIDFromContext(ctx)
+func MustUserID(ctx context.Context) string {
+	id, ok := UserIDFromContext(ctx)
 	if !ok {
-		panic("auth: MustAccountID called without authenticated context")
+		panic("auth: MustUserID called without authenticated context")
 	}
 	return id
 }
 
 // Middleware verifies the user's bearer token by calling the manyrows /a/me endpoint
-// and stores the workspace account ID in the request context.
+// and stores the user ID in the request context.
 func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler) http.Handler {
 	meURL := fmt.Sprintf("%s/x/%s/apps/%s/a/me", manyrowsBaseURL, workspaceSlug, appID)
 
@@ -48,13 +48,13 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 				return
 			}
 
-			accountID, err := resolveAccount(meURL, token)
+			userID, err := resolveUser(meURL, token)
 			if err != nil {
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), accountIDKey, accountID)
+			ctx := context.WithValue(r.Context(), userIDKey, userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -68,7 +68,7 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(h[7:])
 }
 
-func resolveAccount(meURL, token string) (string, error) {
+func resolveUser(meURL, token string) (string, error) {
 	req, err := http.NewRequest("GET", meURL, nil)
 	if err != nil {
 		return "", err
@@ -89,8 +89,8 @@ func resolveAccount(meURL, token string) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
 		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
-	if me.WorkspaceAccount.ID == "" {
-		return "", fmt.Errorf("empty account id")
+	if me.User.ID == "" {
+		return "", fmt.Errorf("empty user id")
 	}
-	return me.WorkspaceAccount.ID, nil
+	return me.User.ID, nil
 }
