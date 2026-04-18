@@ -12,7 +12,7 @@ type contextKey string
 
 const userIDKey contextKey = "userID"
 
-// meResponse is the relevant subset of the /a/me response.
+// meResponse is the relevant subset of the /a/app/me response.
 type meResponse struct {
 	User struct {
 		ID string `json:"id"`
@@ -35,10 +35,10 @@ func MustUserID(ctx context.Context) string {
 	return id
 }
 
-// Middleware verifies the user's bearer token by calling the manyrows /a/me endpoint
-// and stores the user ID in the request context.
+// Middleware verifies the user's bearer token by calling the manyrows
+// /a/app/me endpoint and stores the user ID in the request context.
 func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler) http.Handler {
-	meURL := fmt.Sprintf("%s/x/%s/apps/%s/a/me", manyrowsBaseURL, workspaceSlug, appID)
+	meURL := fmt.Sprintf("%s/x/%s/apps/%s/a/app/me", manyrowsBaseURL, workspaceSlug, appID)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

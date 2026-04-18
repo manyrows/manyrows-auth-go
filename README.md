@@ -71,7 +71,7 @@ fields, err := client.ListUserFields()
 
 ## Auth Middleware
 
-HTTP middleware that validates bearer tokens by calling the ManyRows `/a/me` endpoint.
+HTTP middleware that validates bearer tokens by calling the ManyRows `/a/app/me` endpoint.
 
 ```go
 import "github.com/manyrows/manyrows-go/auth"
