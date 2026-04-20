@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -50,6 +51,7 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 
 			userID, err := resolveUser(meURL, token)
 			if err != nil {
+				log.Printf("auth middleware: resolveUser failed url=%s err=%v", meURL, err)
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
@@ -74,6 +76,7 @@ func resolveUser(meURL, token string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "manyrows-go-auth/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

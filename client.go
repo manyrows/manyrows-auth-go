@@ -41,6 +41,7 @@ func (c *Client) doGet(url string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("User-Agent", "manyrows-go/1.0")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -142,13 +143,13 @@ func (c *Client) HasPermission(accountID, permission string) (bool, error) {
 
 // Member represents a user with roles in the app.
 type Member struct {
-	UserID          string  `json:"userId"`
-	Email           string  `json:"email"`
-	Enabled         bool    `json:"enabled"`
-	Source          string  `json:"source"`
-	AddedAt         string  `json:"addedAt"`
-	LastLoginAt     *string `json:"lastLoginAt,omitempty"`
-	EmailVerifiedAt *string `json:"emailVerifiedAt,omitempty"`
+	UserID          string   `json:"userId"`
+	Email           string   `json:"email"`
+	Enabled         bool     `json:"enabled"`
+	Source          string   `json:"source"`
+	AddedAt         string   `json:"addedAt"`
+	LastLoginAt     *string  `json:"lastLoginAt,omitempty"`
+	EmailVerifiedAt *string  `json:"emailVerifiedAt,omitempty"`
 	Roles           []string `json:"roles"`
 }
 

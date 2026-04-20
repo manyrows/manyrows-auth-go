@@ -47,6 +47,22 @@ func TestDoGet_SetsAPIKey(t *testing.T) {
 	}
 }
 
+func TestDoGet_SetsUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewClient(srv.URL, "ws", "app1", "key")
+	c.doGet(srv.URL + "/test")
+
+	if gotUA == "" || gotUA == "Go-http-client/1.1" {
+		t.Errorf("User-Agent should be set to a custom value, got %q", gotUA)
+	}
+}
+
 func TestDoGet_NonOKStatus(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
