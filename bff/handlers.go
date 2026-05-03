@@ -332,13 +332,24 @@ func writeJSONError(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]any{"error": code})
 }
 
+// writeJSONErrorWithMessage forwards both the code AND the localized
+// message — needed for AppKit's error UI which prefers the message
+// over the raw code.
+func writeJSONErrorWithMessage(w http.ResponseWriter, status int, code, message string) {
+	body := map[string]any{"error": code}
+	if message != "" {
+		body["message"] = message
+	}
+	writeJSON(w, status, body)
+}
+
 // relayErr translates an SDK *APIError into a JSON response that
-// matches ManyRows' wire format ({error: "error.code"} + same status).
+// matches ManyRows' wire format ({error, message} + same status).
 // Non-API errors (network, decode) come out as 500 + "error.internalError".
 func relayErr(w http.ResponseWriter, err error) {
 	var apiErr *APIError
 	if asAPIErr(err, &apiErr) {
-		writeJSONError(w, apiErr.Status, apiErr.Code)
+		writeJSONErrorWithMessage(w, apiErr.Status, apiErr.Code, apiErr.Message)
 		return
 	}
 	writeJSONError(w, http.StatusInternalServerError, "error.internalError")

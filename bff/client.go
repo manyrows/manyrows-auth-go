@@ -271,13 +271,15 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 }
 
 // APIError is the typed error returned when ManyRows responds with
-// 4xx / 5xx. Code is the i18n-style error key (e.g. "error.invalidCredentials")
-// and Status is the HTTP status. Customers can errors.As() this to
-// branch on specific failures.
+// 4xx / 5xx. Code is the i18n-style error key (e.g. "error.invalidCredentials");
+// Message is the language-localized human-readable string ManyRows
+// writes alongside it. The handler layer surfaces both to the browser
+// so AppKit's UI gets the translated message, not the raw code.
 type APIError struct {
-	Status int
-	Code   string
-	Body   string
+	Status  int
+	Code    string
+	Message string
+	Body    string
 }
 
 func (e *APIError) Error() string {
@@ -293,13 +295,14 @@ func (e *APIError) IsUnauthorized() bool { return e.Status == http.StatusUnautho
 
 func decodeAPIError(resp *http.Response) error {
 	var payload struct {
-		Error string `json:"error"`
+		Error   string `json:"error"`
+		Message string `json:"message"`
 	}
 	body, _ := io.ReadAll(resp.Body)
 	if len(body) > 0 {
 		_ = json.Unmarshal(body, &payload)
 	}
-	return &APIError{Status: resp.StatusCode, Code: payload.Error, Body: string(body)}
+	return &APIError{Status: resp.StatusCode, Code: payload.Error, Message: payload.Message, Body: string(body)}
 }
 
 // Sentinel for the (rare) case where a Session was nil-returned for
