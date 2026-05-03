@@ -38,31 +38,59 @@ func MountProxy(r chi.Router, client *Client, sessions *SessionManager) {
 	})
 }
 
-// MountAppBoot attaches the public app-config proxy at /apps/{appId}.
-// AppKit calls this once at boot to fetch auth methods, branding,
-// OAuth client IDs, etc. — public, no session required.
+// MountAppBoot attaches the public app-config proxy at /apps/{appId}
+// AND the pre-login auth-route proxy at /apps/{appId}/auth/* (OAuth
+// authorize calls, password reset, email-OTP request — anything the
+// browser needs to hit before it has a session).
 //
-// The handler proxies to ManyRows' public /x/{workspaceSlug}/apps/{appId}
-// endpoint server-side so the browser stays same-origin in full-BFF
-// mode. workspaceSlug is the customer's workspace identifier; the
-// {appId} URL param matches AppKit's request directly.
+// AppKit in full-BFF mode treats `baseUrl = /apps/<id>` and calls
+// e.g. baseUrl + "/auth/microsoft/authorize". Without these proxies
+// those calls fall through to the customer's SPA fallback (200 +
+// HTML), AppKit fails to parse the response, and the user sees a
+// bare "Request failed." downstream.
 //
-// Cacheable in the future (the response is identical for every visitor)
-// but for now it's one upstream GET per page load. Drop a thin LRU
-// in front of c.HTTP if it shows up in flame graphs.
+// All proxied calls forward as-is to ManyRows' public
+// /x/{workspaceSlug}/apps/{appId}/... surface; no session is added,
+// and any incoming Cookie / Authorization is stripped (the customer's
+// cookie wouldn't make sense to ManyRows, and these endpoints don't
+// want session creds anyway).
+//
+// Cacheable in the future (the boot response is identical for every
+// visitor) but for now it's one upstream call per page load. Drop a
+// thin LRU in front of c.HTTP if it shows up in flame graphs.
 func MountAppBoot(r chi.Router, client *Client, workspaceSlug string) {
-	r.Get("/apps/{appId}", func(w http.ResponseWriter, req *http.Request) {
+	bootProxy := publicAppProxy(client, workspaceSlug, "")
+	authProxy := publicAppProxy(client, workspaceSlug, "/auth")
+
+	r.Get("/apps/{appId}", bootProxy)
+	r.HandleFunc("/apps/{appId}/auth/*", authProxy)
+}
+
+// publicAppProxy builds an http.HandlerFunc that forwards a
+// /apps/{appId}{suffixPrefix}/<rest> request to ManyRows at
+// /x/{workspaceSlug}/apps/{appId}{suffixPrefix}/<rest>. Method,
+// query string, and request body are preserved; hop-by-hop headers
+// and session-bearing headers are stripped on both legs.
+//
+// suffixPrefix is the portion after {appId} that the handler is
+// responsible for ("" for the bare boot endpoint, "/auth" for the
+// pre-login auth surface). It's matched against the request path
+// to recover the trailing wildcard.
+func publicAppProxy(client *Client, workspaceSlug, suffixPrefix string) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
 		appID := chi.URLParam(req, "appId")
-		upstream := client.BaseURL + "/x/" + workspaceSlug + "/apps/" + appID
-		ureq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, upstream, nil)
+		base := "/apps/" + appID + suffixPrefix
+		rest := strings.TrimPrefix(req.URL.Path, base)
+		upstream := client.BaseURL + "/x/" + workspaceSlug + "/apps/" + appID + suffixPrefix + rest
+		if req.URL.RawQuery != "" {
+			upstream += "?" + req.URL.RawQuery
+		}
+
+		ureq, err := http.NewRequestWithContext(req.Context(), req.Method, upstream, req.Body)
 		if err != nil {
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
-		// Forward Accept-Language / similar pass-through headers, but
-		// strip Cookie + Authorization since the public endpoint doesn't
-		// want session creds and the customer's cookie wouldn't make
-		// sense to ManyRows anyway.
 		for k, vv := range req.Header {
 			ck := http.CanonicalHeaderKey(k)
 			if _, hop := hopByHopHeaders[ck]; hop {
@@ -95,5 +123,5 @@ func MountAppBoot(r chi.Router, client *Client, workspaceSlug string) {
 		}
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
-	})
+	}
 }

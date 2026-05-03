@@ -230,20 +230,37 @@ func (h *Handlers) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 
 // OAuthCallback handles GET /auth/oauth/callback?code=...&state=...
 // after ManyRows redirects the user from a provider (Apple / Microsoft /
-// GitHub) login. Browser-driven 302 redirects on every branch:
+// GitHub) login.
 //
-//	success            → cfg.OAuthSuccessRedirect
-//	totp challenge     → cfg.OAuthTOTPRedirect?challengeToken=...
-//	error              → cfg.OAuthErrorRedirect?error=<code>
+// Adaptive response: serves an HTML page that postMessages to
+// window.opener (popup-mode, when AppKit's popup-based OAuth flow is
+// used) OR navigates the current tab to the configured success / error
+// / totp redirect URI (full-page mode). The HTML decides at runtime
+// based on whether window.opener is present, so the same handler
+// covers both cases without any signaling from the caller.
+//
+// In all branches the cookie is written via Set-Cookie on the HTML
+// response itself, so popup callers come back to the opener with the
+// session already valid (since opener and popup are same-origin in
+// BFF mode by construction). For full-page callers the cookie lands
+// before the navigation that follows.
 func (h *Handlers) OAuthCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if errCode := strings.TrimSpace(q.Get("error")); errCode != "" {
-		redirectErr(w, r, h.Cfg.OAuthErrorRedirect, errCode)
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:       "error",
+			Error:         errCode,
+			RedirectError: h.Cfg.OAuthErrorRedirect,
+		})
 		return
 	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
-		redirectErr(w, r, h.Cfg.OAuthErrorRedirect, "missing_code")
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:       "error",
+			Error:         "missing_code",
+			RedirectError: h.Cfg.OAuthErrorRedirect,
+		})
 		return
 	}
 
@@ -254,26 +271,39 @@ func (h *Handlers) OAuthCallback(w http.ResponseWriter, r *http.Request) {
 		if asAPIErr(err, &apiErr) && apiErr.Code != "" {
 			errCode = apiErr.Code
 		}
-		redirectErr(w, r, h.Cfg.OAuthErrorRedirect, errCode)
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:       "error",
+			Error:         errCode,
+			RedirectError: h.Cfg.OAuthErrorRedirect,
+		})
 		return
 	}
 
 	if ses.TOTPRequired {
-		dest := h.Cfg.OAuthTOTPRedirect
-		if dest == "" {
-			redirectErr(w, r, h.Cfg.OAuthErrorRedirect, "totp_redirect_not_configured")
-			return
-		}
-		dest = appendQuery(dest, "challengeToken", ses.ChallengeToken)
-		http.Redirect(w, r, dest, http.StatusFound)
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:        "totp",
+			ChallengeToken: ses.ChallengeToken,
+			RedirectTOTP:   h.Cfg.OAuthTOTPRedirect,
+			RedirectError:  h.Cfg.OAuthErrorRedirect,
+		})
 		return
 	}
 
 	if err := h.Sessions.PutSession(r.Context(), ses); err != nil {
-		redirectErr(w, r, h.Cfg.OAuthErrorRedirect, "session_store_failed")
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:       "error",
+			Error:         "session_store_failed",
+			RedirectError: h.Cfg.OAuthErrorRedirect,
+		})
 		return
 	}
-	http.Redirect(w, r, h.Cfg.OAuthSuccessRedirect, http.StatusFound)
+
+	writeOAuthCallbackResult(w, oauthCallbackResult{
+		Outcome:           "success",
+		UserID:            ses.UserID,
+		TOTPSetupRequired: ses.TOTPSetupRequired,
+		RedirectSuccess:   h.Cfg.OAuthSuccessRedirect,
+	})
 }
 
 // Logout handles POST /auth/logout. Revokes the ManyRows session and
@@ -369,14 +399,6 @@ func asAPIErr(err error, target **APIError) bool {
 		}
 	}
 	return false
-}
-
-func redirectErr(w http.ResponseWriter, r *http.Request, base, errCode string) {
-	if base == "" {
-		http.Error(w, errCode, http.StatusBadRequest)
-		return
-	}
-	http.Redirect(w, r, appendQuery(base, "error", errCode), http.StatusFound)
 }
 
 func appendQuery(base, key, value string) string {
