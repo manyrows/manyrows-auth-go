@@ -142,6 +142,57 @@ func (c *Client) ExchangeAuthCode(ctx context.Context, code, redirectURI string)
 	return c.doSessionPOST(ctx, "/bff/exchange", body)
 }
 
+// ForgotPassword starts the email-OTP password-reset flow. Returns
+// nil on success — no session is issued (the user gets an email with
+// a one-time code which they pair with the new password via
+// ResetPassword). The same anti-enumeration shape as the underlying
+// ManyRows endpoint: 200 OK regardless of whether the email exists,
+// to keep it from being a user-existence oracle.
+func (c *Client) ForgotPassword(ctx context.Context, email, appID string) error {
+	body := map[string]any{"email": email}
+	if appID != "" {
+		body["appId"] = appID
+	}
+	return c.doVoidPOST(ctx, "/bff/forgot-password", body)
+}
+
+// ResetPassword completes the email-OTP password-reset flow. The user
+// supplies the email + the one-time code from the email + a new
+// password. logoutAll, when true, kills every existing session for
+// the user — recommended after a password reset since a stolen
+// session shouldn't survive a password change.
+func (c *Client) ResetPassword(ctx context.Context, email, code, newPassword, appID string, logoutAll bool) error {
+	body := map[string]any{
+		"email":       email,
+		"code":        code,
+		"newPassword": newPassword,
+		"logoutAll":   logoutAll,
+	}
+	if appID != "" {
+		body["appId"] = appID
+	}
+	return c.doVoidPOST(ctx, "/bff/reset-password", body)
+}
+
+// doVoidPOST is the shared shape for endpoints that succeed with 200
+// + no body (forgot-password, reset-password). Decodes the standard
+// {error: "..."} body on non-200 into an APIError.
+func (c *Client) doVoidPOST(ctx context.Context, path string, body any) error {
+	req, err := c.newRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return decodeAPIError(resp)
+	}
+	return nil
+}
+
 // Logout revokes the named session in ManyRows. Idempotent — calling
 // twice with the same sessionID returns nil both times. The SDK's
 // Handlers.Logout calls this then clears the cookie; customers who

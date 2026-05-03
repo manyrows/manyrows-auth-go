@@ -53,23 +53,33 @@ func NewHandlers(client *Client, sessions *SessionManager, cfg HandlersConfig) *
 	return &Handlers{Client: client, Sessions: sessions, Cfg: cfg}
 }
 
-// Mount wires the standard auth routes onto the given router. Equivalent
-// to wiring each HandlerFunc by hand:
+// Router is the minimal surface Mount needs from the customer's
+// router. *http.ServeMux satisfies it; so does chi.Mux. Customers
+// using gorilla/mux or any other router can either implement this
+// interface or wire the handlers manually.
+type Router interface {
+	HandleFunc(pattern string, handler http.HandlerFunc)
+}
+
+// Mount wires the standard auth routes onto the given router.
+// Equivalent to wiring each HandlerFunc by hand:
 //
-//	r.HandleFunc("/auth/login",            h.Login)
-//	r.HandleFunc("/auth/google",           h.LoginGoogle)
-//	r.HandleFunc("/auth/totp/verify",      h.VerifyTOTP)
-//	r.HandleFunc("/auth/oauth/callback",   h.OAuthCallback)
-//	r.HandleFunc("/auth/logout",           h.Logout)
+//	r.HandleFunc("/auth/login",          h.Login)
+//	r.HandleFunc("/auth/google",         h.LoginGoogle)
+//	r.HandleFunc("/auth/totp/verify",    h.VerifyTOTP)
+//	r.HandleFunc("/auth/oauth/callback", h.OAuthCallback)
+//	r.HandleFunc("/auth/logout",         h.Logout)
 //
 // Customers wanting more control (different paths, extra middleware
 // per route) should skip Mount and wire the methods directly.
-func (h *Handlers) Mount(mux *http.ServeMux) {
-	mux.HandleFunc("/auth/login", h.Login)
-	mux.HandleFunc("/auth/google", h.LoginGoogle)
-	mux.HandleFunc("/auth/totp/verify", h.VerifyTOTP)
-	mux.HandleFunc("/auth/oauth/callback", h.OAuthCallback)
-	mux.HandleFunc("/auth/logout", h.Logout)
+func (h *Handlers) Mount(r Router) {
+	r.HandleFunc("/auth/login", h.Login)
+	r.HandleFunc("/auth/google", h.LoginGoogle)
+	r.HandleFunc("/auth/totp/verify", h.VerifyTOTP)
+	r.HandleFunc("/auth/oauth/callback", h.OAuthCallback)
+	r.HandleFunc("/auth/logout", h.Logout)
+	r.HandleFunc("/auth/forgot-password", h.ForgotPassword)
+	r.HandleFunc("/auth/reset-password", h.ResetPassword)
 }
 
 // LoadAndSave wraps the customer's router with the scs session
@@ -142,6 +152,56 @@ func (h *Handlers) LoginGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.completeAuth(w, r, ses)
+}
+
+// ForgotPassword handles POST /auth/forgot-password with body
+// {email, appId}. Public — no session required. Returns {ok:true}
+// on success regardless of whether the email exists (anti-enumeration).
+func (h *Handlers) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Email string `json:"email"`
+		AppID string `json:"appId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "error.badRequest")
+		return
+	}
+	if err := h.Client.ForgotPassword(r.Context(), body.Email, body.AppID); err != nil {
+		relayErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ResetPassword handles POST /auth/reset-password with body
+// {email, code, newPassword, appId, logoutAll}. Public — completes
+// the email-OTP reset flow. No session is issued on success; the
+// user logs in normally afterward.
+func (h *Handlers) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Email       string `json:"email"`
+		Code        string `json:"code"`
+		NewPassword string `json:"newPassword"`
+		AppID       string `json:"appId"`
+		LogoutAll   bool   `json:"logoutAll"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "error.badRequest")
+		return
+	}
+	if err := h.Client.ResetPassword(r.Context(), body.Email, body.Code, body.NewPassword, body.AppID, body.LogoutAll); err != nil {
+		relayErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // VerifyTOTP handles POST /auth/totp/verify with body {challengeToken, code}.
