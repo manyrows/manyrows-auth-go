@@ -63,6 +63,12 @@ func MountAppBoot(r chi.Router, client *Client, workspaceSlug string) {
 	authProxy := publicAppProxy(client, workspaceSlug, "/auth")
 
 	r.Get("/apps/{appId}", bootProxy)
+	// Two patterns because chi's `/*` wildcard requires at least one
+	// segment after the prefix — `/apps/{appId}/auth` itself doesn't
+	// match `/apps/{appId}/auth/*`. AppKit's onRequestCode posts to
+	// the bare /auth path (no suffix) for the email-OTP send step,
+	// so both forms have to route to the same proxy.
+	r.HandleFunc("/apps/{appId}/auth", authProxy)
 	r.HandleFunc("/apps/{appId}/auth/*", authProxy)
 }
 

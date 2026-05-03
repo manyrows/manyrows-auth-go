@@ -75,6 +75,7 @@ type Router interface {
 func (h *Handlers) Mount(r Router) {
 	r.HandleFunc("/auth/login", h.Login)
 	r.HandleFunc("/auth/google", h.LoginGoogle)
+	r.HandleFunc("/auth/verify", h.VerifyOTP)
 	r.HandleFunc("/auth/totp/verify", h.VerifyTOTP)
 	r.HandleFunc("/auth/oauth/callback", h.OAuthCallback)
 	r.HandleFunc("/auth/logout", h.Logout)
@@ -147,6 +148,34 @@ func (h *Handlers) LoginGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ses, err := h.Client.LoginGoogle(r.Context(), body.Credential, body.RememberMe)
+	if err != nil {
+		relayErr(w, err)
+		return
+	}
+	h.completeAuth(w, r, ses)
+}
+
+// VerifyOTP handles POST /auth/verify with JSON body
+// {email, code, appId?, rememberMe}. Used for both fresh-account
+// registration verification AND ongoing OTP-as-primary sign-in.
+// Same response shape as Login (totpRequired branch lands the user
+// on the TOTP screen; otherwise sets the cookie).
+func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Email      string `json:"email"`
+		Code       string `json:"code"`
+		AppID      string `json:"appId"`
+		RememberMe bool   `json:"rememberMe"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "error.badRequest")
+		return
+	}
+	ses, err := h.Client.VerifyOTP(r.Context(), body.Email, body.Code, body.AppID, body.RememberMe)
 	if err != nil {
 		relayErr(w, err)
 		return

@@ -125,6 +125,19 @@ func (c *Client) LoginGoogle(ctx context.Context, credential string, rememberMe 
 	return c.doSessionPOST(ctx, "/bff/google", body)
 }
 
+// VerifyOTP completes the email-OTP code-verification flow for both
+// "primary auth = code" sign-in AND fresh-account registration. The
+// browser hands the customer's BFF (email, code, optional appId,
+// rememberMe); appId presence flips ManyRows into register mode.
+// Same TOTP-branching as LoginPassword.
+func (c *Client) VerifyOTP(ctx context.Context, email, code, appID string, rememberMe bool) (*Session, error) {
+	body := map[string]any{"email": email, "code": code, "rememberMe": rememberMe}
+	if appID != "" {
+		body["appId"] = appID
+	}
+	return c.doSessionPOST(ctx, "/bff/verify", body)
+}
+
 // VerifyTOTP completes a TOTP step-up after LoginPassword / LoginGoogle
 // returned TOTPRequired = true. Pass the challengeToken from that
 // response and the 6-digit code the user typed.
