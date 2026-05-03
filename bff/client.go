@@ -138,6 +138,26 @@ func (c *Client) VerifyOTP(ctx context.Context, email, code, appID string, remem
 	return c.doSessionPOST(ctx, "/bff/verify", body)
 }
 
+// PasskeyLoginBegin starts a discoverable WebAuthn login. Returns the
+// raw {challengeId, publicKeyOptions} payload the browser hands to
+// navigator.credentials.get. No session yet; the matching Finish call
+// completes auth and sets the cookie.
+func (c *Client) PasskeyLoginBegin(ctx context.Context) (json.RawMessage, error) {
+	return c.doRawPOST(ctx, "/bff/passkey/login/begin", map[string]any{})
+}
+
+// PasskeyLoginFinish verifies the WebAuthn assertion the browser
+// returned. Returns Session on success; the SDK Handlers.* layer puts
+// the session in the cookie via completeAuth.
+func (c *Client) PasskeyLoginFinish(ctx context.Context, challengeID string, response json.RawMessage, rememberMe bool) (*Session, error) {
+	body := map[string]any{
+		"challengeId": challengeID,
+		"response":    response,
+		"rememberMe":  rememberMe,
+	}
+	return c.doSessionPOST(ctx, "/bff/passkey/login/finish", body)
+}
+
 // VerifyTOTP completes a TOTP step-up after LoginPassword / LoginGoogle
 // returned TOTPRequired = true. Pass the challengeToken from that
 // response and the 6-digit code the user typed.
@@ -225,6 +245,29 @@ func (c *Client) Logout(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("bff/logout: %s", resp.Status)
 	}
 	return nil
+}
+
+// doRawPOST is the shared shape for endpoints whose JSON response is
+// pass-through to the browser (e.g. WebAuthn challenge payloads). The
+// SDK doesn't model the body — callers forward it untouched.
+func (c *Client) doRawPOST(ctx context.Context, path string, body any) (json.RawMessage, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeAPIError(resp)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read raw response: %w", err)
+	}
+	return raw, nil
 }
 
 // doSessionPOST is the shared shape for the four auth endpoints that

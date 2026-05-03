@@ -77,6 +77,8 @@ func (h *Handlers) Mount(r Router) {
 	r.HandleFunc("/auth/google", h.LoginGoogle)
 	r.HandleFunc("/auth/verify", h.VerifyOTP)
 	r.HandleFunc("/auth/totp/verify", h.VerifyTOTP)
+	r.HandleFunc("/auth/passkey/login/begin", h.PasskeyLoginBegin)
+	r.HandleFunc("/auth/passkey/login/finish", h.PasskeyLoginFinish)
 	r.HandleFunc("/auth/oauth/callback", h.OAuthCallback)
 	r.HandleFunc("/auth/logout", h.Logout)
 	r.HandleFunc("/auth/forgot-password", h.ForgotPassword)
@@ -148,6 +150,50 @@ func (h *Handlers) LoginGoogle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ses, err := h.Client.LoginGoogle(r.Context(), body.Credential, body.RememberMe)
+	if err != nil {
+		relayErr(w, err)
+		return
+	}
+	h.completeAuth(w, r, ses)
+}
+
+// PasskeyLoginBegin handles POST /auth/passkey/login/begin. Forwards
+// the WebAuthn challenge bytes from ManyRows straight back to the
+// browser — the SDK doesn't model the PublicKeyCredentialRequestOptions
+// shape because it's opaque to everything except navigator.credentials.
+func (h *Handlers) PasskeyLoginBegin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	raw, err := h.Client.PasskeyLoginBegin(r.Context())
+	if err != nil {
+		relayErr(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
+}
+
+// PasskeyLoginFinish handles POST /auth/passkey/login/finish with body
+// {challengeId, response, rememberMe}. Verifies the assertion via
+// ManyRows /bff/passkey/login/finish and lands the cookie via
+// completeAuth. Same response shape as Login.
+func (h *Handlers) PasskeyLoginFinish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ChallengeID string          `json:"challengeId"`
+		Response    json.RawMessage `json:"response"`
+		RememberMe  bool            `json:"rememberMe"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "error.badRequest")
+		return
+	}
+	ses, err := h.Client.PasskeyLoginFinish(r.Context(), body.ChallengeID, body.Response, body.RememberMe)
 	if err != nil {
 		relayErr(w, err)
 		return
