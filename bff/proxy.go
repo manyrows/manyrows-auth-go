@@ -128,14 +128,40 @@ func Proxy(c *Client, mgr *SessionManager) http.Handler {
 }
 
 // ClientIPFromRequest is the default extractor used by Handlers when
-// no custom one is configured. Tries (in order):
+// no custom one is configured AND HandlersConfig.TrustXFF is false.
+// Returns r.RemoteAddr only — does NOT trust any forwarded-IP headers.
+//
+// This is the safe-by-default behaviour: on a bare VPS without a
+// reverse proxy that strips inbound X-Forwarded-For / X-Real-IP,
+// trusting those headers lets an attacker spoof the client IP and
+// bypass any per-IP rate limit ManyRows enforces. The default refuses
+// to trust them; customers behind a real LB / proxy that controls
+// XFF should opt in via HandlersConfig.TrustXFF: true OR install a
+// custom extractor via HandlersConfig.ClientIPExtractor.
+//
+// Matches chi/middleware.RealIP's safe-by-default posture.
+func ClientIPFromRequest(r *http.Request) string {
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	return host
+}
+
+// ClientIPFromRequestTrustingProxy is the XFF-aware extractor wired
+// in when HandlersConfig.TrustXFF: true. Tries (in order):
 //   - rightmost X-Forwarded-For (Heroku, most cloud LBs)
 //   - X-Real-IP (nginx, some others)
 //   - r.RemoteAddr (direct connection)
 //
-// Customers behind Cloudflare / a custom proxy should plug in their
-// own extractor via HandlersConfig.ClientIPExtractor.
-func ClientIPFromRequest(r *http.Request) string {
+// ONLY use this on a deployment where the LB / reverse proxy strips
+// or overwrites inbound X-Forwarded-For / X-Real-IP from the client.
+// Otherwise an attacker can spoof these headers and forge their
+// apparent IP. Customers behind Cloudflare or a custom proxy that
+// uses a different header (e.g. CF-Connecting-IP) should write a
+// custom extractor instead — there's no general "trust proxy headers"
+// switch that's safe everywhere.
+func ClientIPFromRequestTrustingProxy(r *http.Request) string {
 	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
 		parts := strings.Split(xff, ",")
 		// rightmost — closest to our edge, hardest to spoof if the

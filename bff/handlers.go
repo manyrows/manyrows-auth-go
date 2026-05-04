@@ -30,9 +30,24 @@ type HandlersConfig struct {
 	OAuthErrorRedirect string
 
 	// ClientIPExtractor returns the end-user's IP from an incoming
-	// browser request. Defaults to ClientIPFromRequest. Override for
-	// non-standard proxy setups (e.g. Cloudflare's CF-Connecting-IP).
+	// browser request. When non-nil, takes precedence over TrustXFF
+	// — use this for non-standard proxy setups (e.g. Cloudflare's
+	// CF-Connecting-IP). When nil, NewHandlers picks an extractor
+	// based on TrustXFF below.
 	ClientIPExtractor func(*http.Request) string
+
+	// TrustXFF opts into reading X-Forwarded-For / X-Real-IP from the
+	// incoming request. Required on Heroku / cloud LBs / any setup
+	// where a trusted reverse proxy in front of this binary sets and
+	// strips those headers. The default (false) is RemoteAddr-only,
+	// which is the only safe choice for a bare VPS where inbound XFF
+	// isn't sanitised — otherwise an attacker can spoof their IP and
+	// bypass per-IP rate limits ManyRows enforces.
+	//
+	// Ignored when ClientIPExtractor is set. Customers using a
+	// non-XFF header (Cloudflare et al.) should leave TrustXFF false
+	// and supply ClientIPExtractor.
+	TrustXFF bool
 }
 
 // Handlers groups the http.HandlerFuncs the customer mounts on their
@@ -48,7 +63,11 @@ type Handlers struct {
 // app boot and pass it to Mount.
 func NewHandlers(client *Client, sessions *SessionManager, cfg HandlersConfig) *Handlers {
 	if cfg.ClientIPExtractor == nil {
-		cfg.ClientIPExtractor = ClientIPFromRequest
+		if cfg.TrustXFF {
+			cfg.ClientIPExtractor = ClientIPFromRequestTrustingProxy
+		} else {
+			cfg.ClientIPExtractor = ClientIPFromRequest
+		}
 	}
 	return &Handlers{Client: client, Sessions: sessions, Cfg: cfg}
 }
