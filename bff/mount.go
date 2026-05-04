@@ -14,8 +14,8 @@ import (
 //	mux := chi.NewRouter()
 //	bff.MountProxy(mux, mrClient, sessions)
 //
-// every browser request to /apps/{appId}/a/* (e.g. /apps/<id>/a/me/sessions,
-// /apps/<id>/a/app/me) is forwarded to ManyRows /bff/proxy/<rest> with
+// every browser request to /apps/{appId}/a/* (e.g. /apps/<id>/a/me,
+// /apps/<id>/a/me/sessions) is forwarded to ManyRows /bff/proxy/<rest> with
 // HTTP Basic + X-BFF-Session-ID. The /apps/{appId}/a prefix is the
 // AppKit convention; customers shouldn't need to think about it.
 //
