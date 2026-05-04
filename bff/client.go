@@ -105,6 +105,14 @@ type Session struct {
 	// hasn't enrolled yet. The session IS issued but the customer's UI
 	// should route to a setup page rather than the home page.
 	TOTPSetupRequired bool `json:"totpSetupRequired,omitempty"`
+
+	// PasswordAlreadySet is true when the verifying user already has a
+	// password configured. AppKit's create-account flow uses this to
+	// skip the post-verify "set your password" screen — otherwise an
+	// existing user re-verifying via the register path would be shown
+	// the screen and the follow-up POST would 400. Only meaningful on
+	// the VerifyOTP response; other auth flows leave it false.
+	PasswordAlreadySet bool `json:"passwordAlreadySet,omitempty"`
 }
 
 // LoginPassword exchanges email + password for a Session. The customer

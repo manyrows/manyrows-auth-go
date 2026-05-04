@@ -422,6 +422,9 @@ func (h *Handlers) completeAuth(w http.ResponseWriter, r *http.Request, ses *Ses
 	if ses.TOTPSetupRequired {
 		resp["totpSetupRequired"] = true
 	}
+	if ses.PasswordAlreadySet {
+		resp["passwordAlreadySet"] = true
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
