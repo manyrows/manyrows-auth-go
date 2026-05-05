@@ -100,11 +100,11 @@ func Proxy(c *Client, mgr *SessionManager) http.Handler {
 		defer resp.Body.Close()
 
 		// On 401 from ManyRows, kill the local cookie too so the
-		// browser doesn't keep replaying a dead session. scs's Destroy
-		// queues the Set-Cookie deletion which LoadAndSave writes when
-		// the response flushes.
+		// browser doesn't keep replaying a dead session. Clear queues
+		// the Set-Cookie deletion which LoadAndSave writes when the
+		// response flushes.
 		if resp.StatusCode == http.StatusUnauthorized {
-			_ = mgr.Destroy(r.Context())
+			_ = mgr.Clear(r.Context())
 		}
 
 		// Copy response headers minus hop-by-hop. Set-Cookie from
