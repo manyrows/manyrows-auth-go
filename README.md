@@ -159,3 +159,33 @@ func main() {
     http.ListenAndServe(":3000", mux)
 }
 ```
+
+## Webhook verification
+
+ManyRows signs every outbound webhook delivery. Use the `webhook`
+package to verify the signature + timestamp on your receiver:
+
+```go
+import "github.com/manyrows/manyrows-go/webhook"
+
+http.HandleFunc("/webhooks/manyrows", func(w http.ResponseWriter, r *http.Request) {
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+    if err := webhook.Verify(secret, r.Header, body); err != nil {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
+        return
+    }
+    // body is verified — parse JSON and process.
+})
+```
+
+`Verify` checks both the HMAC-SHA256 signature (over `<timestamp>.<body>`)
+and that the `X-Webhook-Timestamp` is within ±5 minutes of now. Pass
+`webhook.VerifyOptions{Tolerance: ...}` to widen or tighten the window.
+
+Read the request body **before** verifying — the HMAC covers the raw
+bytes exactly as transmitted; re-serializing parsed JSON will change
+whitespace and break the check.
