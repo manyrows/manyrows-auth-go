@@ -31,6 +31,41 @@ delivery, err := client.GetDelivery()
 // delivery.Flags.Client, delivery.Flags.Server
 ```
 
+### Decrypt secrets
+
+Secret values come back as encrypted envelopes under
+`delivery.Config.Secrets[i].Envelope`. Use the `secrets` package with
+your workspace private key (the JWK you downloaded when you generated
+the keypair in the ManyRows admin UI) to decrypt server-side:
+
+```go
+import (
+    "encoding/json"
+    "github.com/manyrows/manyrows-go/secrets"
+)
+
+// Load once at startup from a secret manager / env var. Never commit it.
+privateKeyJWK := []byte(os.Getenv("MANYROWS_WORKSPACE_PRIVATE_KEY"))
+
+for _, sec := range delivery.Config.Secrets {
+    if !sec.IsSet || len(sec.Envelope) == 0 {
+        continue
+    }
+    plaintext, err := secrets.Decrypt(sec.Envelope, privateKeyJWK)
+    if err != nil {
+        log.Fatal(err)
+    }
+    // plaintext is JSON-encoded — for a string secret you'll get
+    // `"hello"` (with quotes). Unmarshal into the typed value:
+    var v string
+    _ = json.Unmarshal(plaintext, &v)
+}
+```
+
+Algorithm: ECDH P-256 → HKDF-SHA256 → AES-256-GCM. The browser
+encrypts with the workspace public key on save; only the holder of
+the private key can decrypt. ManyRows never sees plaintext.
+
 ### Check permission
 
 ```go

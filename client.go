@@ -69,6 +69,15 @@ type ConfigItem struct {
 	Type  string `json:"type"`
 	Value any    `json:"value,omitempty"`
 	IsSet bool   `json:"isSet,omitempty"` // for secrets
+
+	// Envelope is the encrypted secret payload (set only on entries
+	// under Config.Secrets, only when IsSet is true). Pass to
+	// secrets.Decrypt with your workspace private key to recover the
+	// JSON-encoded plaintext.
+	//
+	// json.RawMessage is the right shape — the envelope is opaque to
+	// us; the secrets package parses + verifies the inner structure.
+	Envelope json.RawMessage `json:"envelope,omitempty"`
 }
 
 // FeatureFlag represents a feature flag.

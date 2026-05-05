@@ -66,9 +66,17 @@ func TestCookie_RejectsTamperedSignature(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour).Unix(),
 	}
 	encoded, _ := mgr.encodeCookie(p)
-	// Flip a bit in the signature.
+	// Replace one char in the middle of the signature segment to be
+	// sure the decoded bytes change (single-char swaps at the
+	// boundary can be base64-equivalent depending on padding).
 	parts := strings.Split(encoded, ".")
-	parts[1] = parts[1][:len(parts[1])-1] + "X"
+	sig := parts[1]
+	mid := len(sig) / 2
+	flip := byte('A')
+	if sig[mid] == 'A' {
+		flip = 'B'
+	}
+	parts[1] = sig[:mid] + string(flip) + sig[mid+1:]
 	tampered := parts[0] + "." + parts[1]
 	if _, ok := mgr.decodeCookie(tampered); ok {
 		t.Fatal("decodeCookie accepted tampered signature")
