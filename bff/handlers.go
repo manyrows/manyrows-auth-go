@@ -348,6 +348,20 @@ func (h *Handlers) OAuthCallback(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// TOTP step-up branch: ManyRows redirects with challengeRequired=1
+	// (and challengeToken=...) instead of an auth code when the OAuth'd
+	// user has TOTP enrolled. Surface it the same way the password
+	// flow's TOTP-required response does, so AppKit's existing
+	// totpRequired listener handles it identically.
+	if q.Get("challengeRequired") == "1" {
+		writeOAuthCallbackResult(w, oauthCallbackResult{
+			Outcome:        "totp",
+			ChallengeToken: strings.TrimSpace(q.Get("challengeToken")),
+			RedirectTOTP:   h.Cfg.OAuthTOTPRedirect,
+			RedirectError:  h.Cfg.OAuthErrorRedirect,
+		})
+		return
+	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
 		writeOAuthCallbackResult(w, oauthCallbackResult{
