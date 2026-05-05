@@ -9,7 +9,7 @@ import (
 )
 
 // MountProxy attaches the AppKit-authed data-call proxy at the
-// standard path AppKit uses in bffMode. After this:
+// standard path AppKit uses when BFF mode is on. After this:
 //
 //	mux := chi.NewRouter()
 //	bff.MountProxy(mux, mrClient, sessions)
@@ -38,31 +38,32 @@ func MountProxy(r chi.Router, client *Client, sessions *SessionManager) {
 	})
 }
 
-// MountAppBoot attaches the public app-config proxy at /apps/{appId}
-// AND the pre-login auth-route proxy at /apps/{appId}/auth/* (OAuth
-// authorize calls, password reset, email-OTP request — anything the
-// browser needs to hit before it has a session).
+// MountAppBoot attaches the pre-login auth-route proxy at
+// /apps/{appId}/auth/* (OAuth authorize calls, password reset,
+// email-OTP request — anything the browser needs to hit before it
+// has a session).
 //
-// AppKit in full-BFF mode treats `baseUrl = /apps/<id>` and calls
-// e.g. baseUrl + "/auth/microsoft/authorize". Without these proxies
-// those calls fall through to the customer's SPA fallback (200 +
-// HTML), AppKit fails to parse the response, and the user sees a
-// bare "Request failed." downstream.
+// AppKit in full-BFF mode calls e.g. /apps/<id>/auth/microsoft/authorize.
+// Without this proxy those calls fall through to the customer's SPA
+// fallback (200 + HTML), AppKit fails to parse the response, and the
+// user sees a bare "Request failed." downstream.
 //
 // All proxied calls forward as-is to ManyRows' public
-// /x/{workspaceSlug}/apps/{appId}/... surface; no session is added,
+// /x/{workspaceSlug}/apps/{appId}/auth/... surface; no session is added,
 // and any incoming Cookie / Authorization is stripped (the customer's
 // cookie wouldn't make sense to ManyRows, and these endpoints don't
 // want session creds anyway).
 //
-// Cacheable in the future (the boot response is identical for every
-// visitor) but for now it's one upstream call per page load. Drop a
-// thin LRU in front of c.HTTP if it shows up in flame graphs.
+// Note: the bare /apps/{appId} app-boot endpoint is intentionally NOT
+// mounted here. AppKit fetches the app config (which carries the
+// `bffMode` flag itself) directly from ManyRows on every page load
+// via standard CORS — that's how it discovers BFF mode in the first
+// place. Customers must add their AppKit origin to the app's CORS
+// allowlist; in exchange, the boot path stays a single hop and the
+// admin BFF toggle is the single source of truth.
 func MountAppBoot(r chi.Router, client *Client, workspaceSlug string) {
-	bootProxy := publicAppProxy(client, workspaceSlug, "")
 	authProxy := publicAppProxy(client, workspaceSlug, "/auth")
 
-	r.Get("/apps/{appId}", bootProxy)
 	// Two patterns because chi's `/*` wildcard requires at least one
 	// segment after the prefix — `/apps/{appId}/auth` itself doesn't
 	// match `/apps/{appId}/auth/*`. AppKit's onRequestCode posts to
