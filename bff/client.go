@@ -47,6 +47,14 @@ const (
 	headerClientUA  = "X-BFF-Client-User-Agent"
 )
 
+// clientUserAgent is the stable User-Agent the SDK sets on every
+// outbound /bff/* request. Identifiable so customers can target it
+// in Cloudflare / WAF rules — Bot Fight Mode flags Go's default
+// "Go-http-client/1.1" by design, breaking server-to-server traffic
+// from BFF backends sitting behind Cloudflare. Bump the version
+// suffix on breaking SDK changes.
+const clientUserAgent = "manyrows-go-bff/1.0"
+
 // Client is the typed entry point for server-to-server calls into
 // ManyRows /bff/*. Construct once at app boot, share across goroutines
 // (it's safe — http.Client and the auth fields are immutable after New).
@@ -324,6 +332,12 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body any) 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
+	// Stable, identifiable User-Agent so customers can pin Cloudflare /
+	// WAF allowlist rules to this exact value instead of the generic
+	// "Go-http-client/1.1" that Bot Fight Mode flags. Server-to-server
+	// /bff/* traffic from a customer's BFF backend looks like a bot
+	// to Cloudflare without a recognisable UA.
+	req.Header.Set("User-Agent", clientUserAgent)
 	req.SetBasicAuth(c.ClientID, c.ClientSecret)
 	if ip := ClientIPFromContext(ctx); ip != "" {
 		req.Header.Set(headerClientIP, ip)
