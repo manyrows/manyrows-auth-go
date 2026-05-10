@@ -106,7 +106,12 @@ fields, err := client.ListUserFields()
 
 ## Auth Middleware
 
-HTTP middleware that validates bearer tokens by calling the ManyRows `/a/app/me` endpoint.
+HTTP middleware that verifies the user's JWT **locally** against the
+install's JWKS. Fetches `${baseURL}/.well-known/jwks.json` once on
+first verify, caches the keys in-process, and refetches on a kid
+mismatch — no per-request round trip to ManyRows. Falls back to the
+`mr_at` HttpOnly cookie when no `Authorization: Bearer` header is
+present (cookie-mode AppKit deploys).
 
 ```go
 import "github.com/manyrows/manyrows-go/auth"
@@ -118,9 +123,21 @@ import "github.com/manyrows/manyrows-go/auth"
 r.Use(auth.Middleware(manyrowsBaseURL, workspaceSlug, appID))
 ```
 
+The middleware accepts the JWT from either:
+1. `Authorization: Bearer <jwt>` (local mode / Tier 1)
+2. `mr_at` cookie (cookie-mode AppKit, when your auth host and app
+   host share a registrable domain)
+
+Set `MANYROWS_BASE_URL` to the URL the SDK should use for JWKS lookup
+(e.g. `https://app.manyrows.com` or your install's custom domain).
+The `workspaceSlug` and `appID` parameters are accepted for forward-
+compat (a future audience check); they're not currently used by the
+verifier.
+
 ### UserIDFromContext
 
-Extracts the user ID from the request context. Returns `false` if not present.
+Extracts the user ID (the JWT's `sub` claim) from the request context.
+Returns `false` if not present.
 
 ```go
 userID, ok := auth.UserIDFromContext(r.Context())
