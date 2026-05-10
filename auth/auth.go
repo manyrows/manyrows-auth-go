@@ -90,12 +90,30 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 	}
 }
 
+// accessCookieName matches manyrows-core's clientauth.AccessCookieName().
+// The SDK can't import that package (cyclic between manyrows-go and
+// manyrows-core), so the constant is duplicated here. Keep in sync if
+// the server-side name ever changes.
+const accessCookieName = "mr_at"
+
+// bearerToken returns the JWT to verify, picked from (in order):
+//  1. Authorization: Bearer <jwt>  — local/Tier-1 mode and any caller
+//     that forwards the SDK's Bearer header.
+//  2. mr_at cookie                 — cookie mode: the SDK uses HttpOnly
+//     cookies and never attaches a Bearer header. Browsers send the
+//     cookie on same-site requests automatically when the customer's
+//     auth host and app host share a registrable domain.
 func bearerToken(r *http.Request) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
-	if !strings.HasPrefix(h, "Bearer ") {
-		return ""
+	if strings.HasPrefix(h, "Bearer ") {
+		if t := strings.TrimSpace(h[7:]); t != "" {
+			return t
+		}
 	}
-	return strings.TrimSpace(h[7:])
+	if c, err := r.Cookie(accessCookieName); err == nil && c != nil {
+		return strings.TrimSpace(c.Value)
+	}
+	return ""
 }
 
 // verifier owns the JWKS cache and runs the local signature check.
