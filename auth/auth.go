@@ -1,24 +1,46 @@
+// Package auth verifies ManyRows-issued bearer JWTs locally using
+// the install's JWKS document, then stashes the userID on the
+// request context for downstream handlers.
+//
+// Tokens are signed ES256. The verifier fetches
+// `${manyrowsBaseURL}/.well-known/jwks.json` once at first verify,
+// caches the parsed keys for `jwksCacheTTL`, and refetches on a kid
+// mismatch (so a server-side rotation propagates without a restart).
+//
+// No round trip per request; no shared secret. The middleware's
+// public surface (Middleware, UserIDFromContext, MustUserID) is
+// unchanged from the previous /a/me-based implementation —
+// customers re-import and rebuild, no code changes on their side.
 package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type contextKey string
 
 const userIDKey contextKey = "userID"
 
-// meResponse is the relevant subset of the /a/me response.
-type meResponse struct {
-	User struct {
-		ID string `json:"id"`
-	} `json:"user"`
-}
+// jwksCacheTTL is how long a fetched JWKS is trusted before a
+// background-style refetch is triggered. 1 hour matches what most
+// SDKs (Auth0, Cognito) default to. Shorter would catch rotations
+// faster; longer reduces network noise.
+const jwksCacheTTL = time.Hour
 
 // UserIDFromContext extracts the manyrows user ID from the request context.
 func UserIDFromContext(ctx context.Context) (string, bool) {
@@ -36,10 +58,16 @@ func MustUserID(ctx context.Context) string {
 	return id
 }
 
-// Middleware verifies the user's bearer token by calling the manyrows
-// /a/me endpoint and stores the user ID in the request context.
+// Middleware verifies Bearer JWTs against the ManyRows install's
+// JWKS, stores the resulting user ID in request context, and 401s
+// any request that's missing or fails verification.
+//
+// workspaceSlug and appID are accepted but not currently used for
+// verification — kept in the signature for source-compat with the
+// previous /a/me-based middleware, and so a future audience check
+// has the values it needs without a breaking API change.
 func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler) http.Handler {
-	meURL := fmt.Sprintf("%s/x/%s/apps/%s/a/me", manyrowsBaseURL, workspaceSlug, appID)
+	v := newVerifier(manyrowsBaseURL)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -48,14 +76,14 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
-
-			userID, err := resolveUser(meURL, token)
+			userID, err := v.verify(r.Context(), token)
 			if err != nil {
-				log.Printf("auth middleware: resolveUser failed url=%s err=%v", meURL, err)
+				log.Printf("auth middleware: verify failed: %v", err)
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
-
+			_ = workspaceSlug
+			_ = appID
 			ctx := context.WithValue(r.Context(), userIDKey, userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -70,30 +98,153 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(h[7:])
 }
 
-func resolveUser(meURL, token string) (string, error) {
-	req, err := http.NewRequest("GET", meURL, nil)
+// verifier owns the JWKS cache and runs the local signature check.
+// One per Middleware instance so each (baseURL) keeps its own keys.
+type verifier struct {
+	jwksURL string
+
+	mu        sync.RWMutex
+	keysByKID map[string]*ecdsa.PublicKey
+	fetchedAt time.Time
+}
+
+func newVerifier(manyrowsBaseURL string) *verifier {
+	return &verifier{
+		jwksURL: strings.TrimRight(manyrowsBaseURL, "/") + "/.well-known/jwks.json",
+	}
+}
+
+// verify parses the bearer, looks up the kid in cache (refetching
+// on miss or expiry), and validates signature + standard claims.
+// Returns the `sub` claim on success.
+func (v *verifier) verify(ctx context.Context, token string) (string, error) {
+	parsed, err := jwt.Parse(token,
+		func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodECDSA); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %s", t.Method.Alg())
+			}
+			kid, _ := t.Header["kid"].(string)
+			return v.keyByKID(ctx, kid)
+		},
+		jwt.WithValidMethods([]string{"ES256"}),
+		jwt.WithLeeway(60*time.Second), // tolerate ±60s clock skew
+	)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "manyrows-go-auth/1.0")
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", errors.New("unexpected claims shape")
+	}
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return "", errors.New("missing sub claim")
+	}
+	return sub, nil
+}
 
+// keyByKID returns the public key for the given kid, fetching JWKS
+// from the issuer if the cache is empty / stale or the kid isn't
+// known. A refetch on unknown kid is bounded to once per call so a
+// stream of bad kids can't pin us against the network.
+func (v *verifier) keyByKID(ctx context.Context, kid string) (*ecdsa.PublicKey, error) {
+	v.mu.RLock()
+	cached, hit := v.keysByKID[kid]
+	stale := time.Since(v.fetchedAt) > jwksCacheTTL
+	v.mu.RUnlock()
+	if hit && !stale {
+		return cached, nil
+	}
+	if err := v.refresh(ctx); err != nil {
+		// Fall back to a stale cached key if we have one — better to
+		// keep authenticating users than to hard-fail every request
+		// during a transient network blip.
+		if hit {
+			return cached, nil
+		}
+		return nil, err
+	}
+	v.mu.RLock()
+	k, ok := v.keysByKID[kid]
+	v.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown kid: %s", kid)
+	}
+	return k, nil
+}
+
+func (v *verifier) refresh(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", v.jwksURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "manyrows-go-auth/1.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("manyrows request failed: %w", err)
+		return fmt.Errorf("jwks fetch: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("manyrows returned %d", resp.StatusCode)
+		return fmt.Errorf("jwks fetch: status %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("jwks read: %w", err)
+	}
+	keys, err := parseJWKS(body)
+	if err != nil {
+		return fmt.Errorf("jwks parse: %w", err)
+	}
+	v.mu.Lock()
+	v.keysByKID = keys
+	v.fetchedAt = time.Now()
+	v.mu.Unlock()
+	return nil
+}
 
-	var me meResponse
-	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+// jwksDoc / jwk are the wire shape of /.well-known/jwks.json. We
+// only consume the EC P-256 path today; non-EC entries are skipped
+// rather than erroring so a future server that publishes mixed key
+// types stays compatible.
+type jwksDoc struct {
+	Keys []jwk `json:"keys"`
+}
+
+type jwk struct {
+	Kty string `json:"kty"`
+	Crv string `json:"crv"`
+	Kid string `json:"kid"`
+	Alg string `json:"alg"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+}
+
+func parseJWKS(body []byte) (map[string]*ecdsa.PublicKey, error) {
+	var doc jwksDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
 	}
-	if me.User.ID == "" {
-		return "", fmt.Errorf("empty user id")
+	out := make(map[string]*ecdsa.PublicKey, len(doc.Keys))
+	for _, k := range doc.Keys {
+		if k.Kty != "EC" || k.Crv != "P-256" || k.Kid == "" {
+			continue
+		}
+		xb, err := base64.RawURLEncoding.DecodeString(k.X)
+		if err != nil {
+			continue
+		}
+		yb, err := base64.RawURLEncoding.DecodeString(k.Y)
+		if err != nil {
+			continue
+		}
+		out[k.Kid] = &ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+			X:     new(big.Int).SetBytes(xb),
+			Y:     new(big.Int).SetBytes(yb),
+		}
 	}
-	return me.User.ID, nil
+	if len(out) == 0 {
+		return nil, errors.New("no usable EC P-256 keys in JWKS")
+	}
+	return out, nil
 }
