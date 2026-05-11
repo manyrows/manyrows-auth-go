@@ -1,6 +1,11 @@
 # manyrows-go
 
-Go libraries for integrating with [ManyRows](https://manyrows.com).
+Go libraries for integrating with a [ManyRows](https://manyrows.com) install.
+
+The examples below assume a self-hosted deployment at
+`https://manyrows.example.com`. Swap in whatever host your install
+runs on (`http://localhost:3000` for local development, your own
+domain in production).
 
 ## Install
 
@@ -16,10 +21,10 @@ The client wraps the ManyRows Server API. Requires an API key.
 import manyrows "github.com/manyrows/manyrows-go"
 
 client := manyrows.NewClient(
-    "https://app.manyrows.com",  // base URL
-    "your-workspace",            // workspace slug
-    "your-app-id",               // app ID
-    "mr_a1b2c3d4_yourSecretKey", // API key
+    "https://manyrows.example.com", // base URL of your install
+    "your-workspace",               // workspace slug
+    "your-app-id",                  // app ID
+    "mr_a1b2c3d4_yourSecretKey",    // API key
 )
 ```
 
@@ -36,7 +41,7 @@ delivery, err := client.GetDelivery()
 Secret values come back as encrypted envelopes under
 `delivery.Config.Secrets[i].Envelope`. Use the `secrets` package with
 your workspace private key (the JWK you downloaded when you generated
-the keypair in the ManyRows admin UI) to decrypt server-side:
+the keypair in your install's admin UI) to decrypt server-side:
 
 ```go
 import (
@@ -64,7 +69,8 @@ for _, sec := range delivery.Config.Secrets {
 
 Algorithm: ECDH P-256 → HKDF-SHA256 → AES-256-GCM. The browser
 encrypts with the workspace public key on save; only the holder of
-the private key can decrypt. ManyRows never sees plaintext.
+the private key can decrypt. The server stores the envelope as-is
+and never has access to the plaintext.
 
 ### Check permission
 
@@ -129,10 +135,10 @@ The middleware accepts the JWT from either:
    host share a registrable domain)
 
 Set `MANYROWS_BASE_URL` to the URL the SDK should use for JWKS lookup
-(e.g. `https://app.manyrows.com` or your install's custom domain).
-The `workspaceSlug` and `appID` parameters are accepted for forward-
-compat (a future audience check); they're not currently used by the
-verifier.
+(your install's host, e.g. `https://manyrows.example.com` or
+`http://localhost:3000` in development). The `workspaceSlug` and
+`appID` parameters are accepted for forward-compat (a future audience
+check); they're not currently used by the verifier.
 
 ### UserIDFromContext
 
@@ -167,7 +173,7 @@ import (
 
 func main() {
     client := manyrows.NewClient(
-        "https://app.manyrows.com",
+        "https://manyrows.example.com",
         "my-workspace",
         "my-app-id",
         os.Getenv("MANYROWS_API_KEY"),
@@ -203,7 +209,7 @@ func main() {
     })
 
     mux.Handle("/api/", auth.Middleware(
-        "https://app.manyrows.com",
+        "https://manyrows.example.com",
         "my-workspace",
         "my-app-id",
     )(protected))
