@@ -37,10 +37,13 @@ type contextKey string
 const userIDKey contextKey = "userID"
 
 // jwksCacheTTL is how long a fetched JWKS is trusted before a
-// background-style refetch is triggered. 1 hour matches what most
-// SDKs (Auth0, Cognito) default to. Shorter would catch rotations
-// faster; longer reduces network noise.
-const jwksCacheTTL = time.Hour
+// background-style refetch is triggered. Aligned with the
+// other-language SDKs (Node/Python/Java) around 10 minutes — long
+// enough to absorb steady-state load, short enough that an
+// emergency key rotation on the server reaches all replicas in
+// ~10 min without an SDK restart. Previously 1 hour, which left
+// Go deployments lagging Node/Python on rotation propagation.
+const jwksCacheTTL = 10 * time.Minute
 
 // UserIDFromContext extracts the manyrows user ID from the request context.
 func UserIDFromContext(ctx context.Context) (string, bool) {
@@ -70,6 +73,14 @@ func MustUserID(ctx context.Context) string {
 // rejects anything that doesn't match the appID this middleware was
 // configured for.
 func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler) http.Handler {
+	// Reject misconfigured baseURL at construction. JWKS fetches over
+	// plain HTTP let a network attacker substitute keys and forge any
+	// JWT; this is a fatal config error the customer needs to see
+	// immediately, not a runtime 5xx after deploy. Localhost stays
+	// allowed so dev loops aren't blocked.
+	if err := requireSecureBaseURL(manyrowsBaseURL); err != nil {
+		panic("manyrows-go auth: " + err.Error())
+	}
 	v := newVerifier(manyrowsBaseURL, appID)
 	_ = workspaceSlug // reserved for future per-workspace checks
 
@@ -129,6 +140,12 @@ func bearerToken(r *http.Request, appID string) string {
 type verifier struct {
 	jwksURL       string
 	expectedAppID string
+	// expectedIss is the install URL the SDK was configured for, used
+	// to validate the JWT's iss claim. The server publishes JWTs whose
+	// iss == the install base URL (or per-app AuthDomain — customers
+	// using AuthDomain must point manyrowsBaseURL at their AuthDomain,
+	// not the install URL, so JWKS and iss both line up).
+	expectedIss string
 
 	mu        sync.RWMutex
 	keysByKID map[string]*ecdsa.PublicKey
@@ -136,10 +153,36 @@ type verifier struct {
 }
 
 func newVerifier(manyrowsBaseURL, expectedAppID string) *verifier {
+	trimmed := strings.TrimRight(manyrowsBaseURL, "/")
 	return &verifier{
-		jwksURL:       strings.TrimRight(manyrowsBaseURL, "/") + "/.well-known/jwks.json",
+		jwksURL:       trimmed + "/.well-known/jwks.json",
 		expectedAppID: expectedAppID,
+		expectedIss:   trimmed,
 	}
+}
+
+// requireSecureBaseURL rejects baseURL values that would make JWKS
+// fetches MITM-able. Only https://… is accepted, with the usual
+// localhost / 127.0.0.1 / [::1] dev exceptions so local round-trips
+// don't force operators into self-signed cert dances.
+func requireSecureBaseURL(raw string) error {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return errors.New("baseURL is empty")
+	}
+	if strings.HasPrefix(s, "https://") {
+		return nil
+	}
+	for _, prefix := range []string{
+		"http://localhost",
+		"http://127.0.0.1",
+		"http://[::1]",
+	} {
+		if strings.HasPrefix(s, prefix) {
+			return nil
+		}
+	}
+	return fmt.Errorf("baseURL must use https:// (got %q) — refusing to fetch JWKS over plaintext", raw)
 }
 
 // verify parses the bearer, looks up the kid in cache (refetching
@@ -168,6 +211,20 @@ func (v *verifier) verify(ctx context.Context, token string) (string, error) {
 	if sub == "" {
 		return "", errors.New("missing sub claim")
 	}
+	// iss check: defence-in-depth against cross-install token replay.
+	// The server's own signature already binds the token to the install
+	// (it's signed with the install's private key), but if a single
+	// signing key were ever shared across deployments — operator error,
+	// or a future "promoted from staging" migration — this catch
+	// surfaces it instead of silently accepting. Skipped when
+	// expectedIss is empty (shouldn't happen via Middleware, but
+	// keeps the verifier usable in tests that build it directly).
+	if v.expectedIss != "" {
+		iss, _ := claims["iss"].(string)
+		if !issMatches(iss, v.expectedIss) {
+			return "", fmt.Errorf("iss claim %q does not match configured baseURL %q", iss, v.expectedIss)
+		}
+	}
 	// aud check: refuse tokens minted for a different app on this
 	// install. Catches the cross-app cookie ride-along between sibling
 	// subdomains (prod token reaching staging on the same eTLD). Empty
@@ -180,6 +237,14 @@ func (v *verifier) verify(ctx context.Context, token string) (string, error) {
 		}
 	}
 	return sub, nil
+}
+
+// issMatches compares the JWT's iss claim to the configured baseURL,
+// tolerating an optional trailing "/" on either side. The server can
+// be configured with or without the slash; we don't want the operator
+// to have to think about which.
+func issMatches(claim, expected string) bool {
+	return strings.TrimRight(claim, "/") == strings.TrimRight(expected, "/")
 }
 
 // audMatches handles both shapes RFC 7519 allows for `aud`: a single

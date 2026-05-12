@@ -51,17 +51,21 @@ func leftPad32(b []byte) []byte {
 	return out
 }
 
-// signToken mints an ES256 JWT with the test key + given subject.
-// Optional overrides let individual tests tweak alg / kid / exp.
 // signToken mints an ES256 JWT with the test key + given subject. The
 // aud claim defaults to "app1" so it matches the Middleware setups in
 // every existing test; pass an opts func that sets MapClaims["aud"] to
 // something else when a test needs to exercise the aud-mismatch path.
+//
+// iss defaults to a sentinel that won't match any real server URL —
+// every test that runs against a httptest.NewServer threads its own
+// srv.URL through withIss so the SDK's iss validation has something
+// real to compare against.
 func (k *testKey) signToken(t *testing.T, sub string, opts ...func(*jwt.Token)) string {
 	t.Helper()
 	claims := jwt.MapClaims{
 		"sub": sub,
 		"aud": "app1",
+		"iss": "https://test.invalid",
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(time.Hour).Unix(),
 	}
@@ -75,6 +79,15 @@ func (k *testKey) signToken(t *testing.T, sub string, opts ...func(*jwt.Token)) 
 		t.Fatalf("sign: %v", err)
 	}
 	return signed
+}
+
+// withIss sets the JWT's iss claim. Tests pass their httptest server's
+// URL so it matches the Middleware's expectedIss (derived from the
+// baseURL the test passes to Middleware).
+func withIss(url string) func(*jwt.Token) {
+	return func(tok *jwt.Token) {
+		tok.Claims.(jwt.MapClaims)["iss"] = url
+	}
 }
 
 // jwksHandler serves a JWKS doc containing the given keys. callCount
@@ -212,7 +225,7 @@ func TestMiddleware_ValidToken(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest("GET", "/protected", nil)
-	req.Header.Set("Authorization", "Bearer "+k.signToken(t, "user-55"))
+	req.Header.Set("Authorization", "Bearer "+k.signToken(t, "user-55", withIss(srv.URL)))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
@@ -234,7 +247,7 @@ func TestMiddleware_WrongAudienceRejected(t *testing.T) {
 	srv := jwksServer(t, nil, k)
 	mw := Middleware(srv.URL, "ws", "app1")
 
-	tok := k.signToken(t, "u1", func(t *jwt.Token) {
+	tok := k.signToken(t, "u1", withIss(srv.URL), func(t *jwt.Token) {
 		t.Claims.(jwt.MapClaims)["aud"] = "app2"
 	})
 
@@ -259,7 +272,7 @@ func TestMiddleware_AudArrayMatches(t *testing.T) {
 	srv := jwksServer(t, nil, k)
 	mw := Middleware(srv.URL, "ws", "app1")
 
-	tok := k.signToken(t, "u1", func(t *jwt.Token) {
+	tok := k.signToken(t, "u1", withIss(srv.URL), func(t *jwt.Token) {
 		t.Claims.(jwt.MapClaims)["aud"] = []interface{}{"other-app", "app1", "third"}
 	})
 
@@ -284,7 +297,7 @@ func TestMiddleware_TamperedToken(t *testing.T) {
 	srv := jwksServer(t, nil, k)
 	mw := Middleware(srv.URL, "ws", "app1")
 
-	tok := k.signToken(t, "u1")
+	tok := k.signToken(t, "u1", withIss(srv.URL))
 	// Flip a char in the MIDDLE of the signature segment. Tweaking
 	// the trailing char is unsafe — base64's bit-packing means the
 	// last alphabet char often has unused trailing bits, so a swap
@@ -390,7 +403,7 @@ func TestMiddleware_JWKSCachedAcrossRequests(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	tok := k.signToken(t, "u1")
+	tok := k.signToken(t, "u1", withIss(srv.URL))
 	for i := 0; i < 3; i++ {
 		req := httptest.NewRequest("GET", "/", nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
@@ -424,7 +437,7 @@ func TestMiddleware_RefetchOnUnknownKid(t *testing.T) {
 
 	// Warm the cache with a valid k1 token.
 	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("Authorization", "Bearer "+k1.signToken(t, "u1"))
+	req.Header.Set("Authorization", "Bearer "+k1.signToken(t, "u1", withIss(srv.URL)))
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -437,7 +450,7 @@ func TestMiddleware_RefetchOnUnknownKid(t *testing.T) {
 
 	// Now hit it with a token using k2's kid. Cache-miss path should
 	// trigger a refetch.
-	tok2 := k2.signToken(t, "u2")
+	tok2 := k2.signToken(t, "u2", withIss(srv.URL))
 	req2 := httptest.NewRequest("GET", "/", nil)
 	req2.Header.Set("Authorization", "Bearer "+tok2)
 	rr2 := httptest.NewRecorder()
@@ -475,7 +488,7 @@ func TestMiddleware_BackendDownAfterCacheWarmed(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	tok := k.signToken(t, "u1")
+	tok := k.signToken(t, "u1", withIss(srv.URL))
 
 	// Warm the cache.
 	rr := httptest.NewRecorder()
@@ -494,5 +507,63 @@ func TestMiddleware_BackendDownAfterCacheWarmed(t *testing.T) {
 	handler.ServeHTTP(rr2, req2)
 	if rr2.Code != http.StatusOK {
 		t.Errorf("cached path with backend down: status = %d, want 200", rr2.Code)
+	}
+}
+
+// Middleware must refuse plain-http baseURLs (except localhost) so a
+// customer typo can't silently turn JWKS-over-MITM into a successful
+// verify. Panics at config time so the deploy fails fast.
+func TestMiddleware_PanicsOnHTTPBaseURL(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for plain-http baseURL")
+		}
+	}()
+	_ = Middleware("http://app.example.com", "ws", "app1")
+}
+
+// Localhost http is still allowed so dev loops work without
+// self-signed certs.
+func TestMiddleware_AcceptsLocalhostHTTP(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("unexpected panic for localhost baseURL: %v", r)
+		}
+	}()
+	_ = Middleware("http://localhost:8080", "ws", "app1")
+	_ = Middleware("http://127.0.0.1:8080", "ws", "app1")
+	_ = Middleware("https://app.example.com", "ws", "app1")
+}
+
+// Token signed by this install but missing iss (or with iss pointing
+// at a different deployment) is rejected as a defence-in-depth measure
+// against shared-signing-key replay.
+func TestMiddleware_RejectsIssMismatch(t *testing.T) {
+	k := newTestKey(t)
+	srv := jwksServer(t, nil, k)
+	mw := Middleware(srv.URL, "ws", "app1")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Wrong iss — server URL but different host:
+	tok := k.signToken(t, "u1", withIss("https://other-install.example.com"))
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (iss mismatch must reject)", rr.Code)
+	}
+
+	// Trailing slash on one side is fine — server may or may not
+	// emit it; the operator shouldn't have to think about it.
+	tok2 := k.signToken(t, "u1", withIss(srv.URL+"/"))
+	req2 := httptest.NewRequest("GET", "/", nil)
+	req2.Header.Set("Authorization", "Bearer "+tok2)
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusOK {
+		t.Errorf("trailing-slash iss: status = %d, want 200", rr2.Code)
 	}
 }
