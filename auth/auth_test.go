@@ -53,10 +53,15 @@ func leftPad32(b []byte) []byte {
 
 // signToken mints an ES256 JWT with the test key + given subject.
 // Optional overrides let individual tests tweak alg / kid / exp.
+// signToken mints an ES256 JWT with the test key + given subject. The
+// aud claim defaults to "app1" so it matches the Middleware setups in
+// every existing test; pass an opts func that sets MapClaims["aud"] to
+// something else when a test needs to exercise the aud-mismatch path.
 func (k *testKey) signToken(t *testing.T, sub string, opts ...func(*jwt.Token)) string {
 	t.Helper()
 	claims := jwt.MapClaims{
 		"sub": sub,
+		"aud": "app1",
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(time.Hour).Unix(),
 	}
@@ -167,7 +172,7 @@ func TestBearerToken(t *testing.T) {
 		if tt.header != "" {
 			r.Header.Set("Authorization", tt.header)
 		}
-		got := bearerToken(r)
+		got := bearerToken(r, "app1")
 		if got != tt.want {
 			t.Errorf("bearerToken(%q) = %q, want %q", tt.header, got, tt.want)
 		}
@@ -219,6 +224,61 @@ func TestMiddleware_ValidToken(t *testing.T) {
 	}
 }
 
+func TestMiddleware_WrongAudienceRejected(t *testing.T) {
+	// Token minted for app2 (e.g. the staging app on the same eTLD)
+	// must be rejected by the middleware configured for app1. This is
+	// the load-bearing check that keeps prod cookies from riding into
+	// staging when both apps share auth.<root>.com / Cookie domain
+	// <root>.com.
+	k := newTestKey(t)
+	srv := jwksServer(t, nil, k)
+	mw := Middleware(srv.URL, "ws", "app1")
+
+	tok := k.signToken(t, "u1", func(t *jwt.Token) {
+		t.Claims.(jwt.MapClaims)["aud"] = "app2"
+	})
+
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not run when aud points at a different app")
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (cross-app token must be rejected)", rr.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestMiddleware_AudArrayMatches(t *testing.T) {
+	// aud claim is allowed to be an array of strings per RFC 7519.
+	// Match if the configured appID appears anywhere in the array.
+	k := newTestKey(t)
+	srv := jwksServer(t, nil, k)
+	mw := Middleware(srv.URL, "ws", "app1")
+
+	tok := k.signToken(t, "u1", func(t *jwt.Token) {
+		t.Claims.(jwt.MapClaims)["aud"] = []interface{}{"other-app", "app1", "third"}
+	})
+
+	called := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK || !called {
+		t.Errorf("array aud containing app1 should be accepted; got status=%d called=%v", rr.Code, called)
+	}
+}
+
 func TestMiddleware_TamperedToken(t *testing.T) {
 	k := newTestKey(t)
 	srv := jwksServer(t, nil, k)
@@ -263,6 +323,7 @@ func TestMiddleware_ExpiredToken(t *testing.T) {
 	// Build a token with exp in the past, well beyond the 60s leeway.
 	claims := jwt.MapClaims{
 		"sub": "u1",
+		"aud": "app1",
 		"iat": time.Now().Add(-2 * time.Hour).Unix(),
 		"exp": time.Now().Add(-1 * time.Hour).Unix(),
 	}
@@ -294,6 +355,7 @@ func TestMiddleware_WrongKey(t *testing.T) {
 
 	claims := jwt.MapClaims{
 		"sub": "u1",
+		"aud": "app1",
 		"iat": time.Now().Unix(),
 		"exp": time.Now().Add(time.Hour).Unix(),
 	}

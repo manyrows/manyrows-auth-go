@@ -59,19 +59,23 @@ func MustUserID(ctx context.Context) string {
 }
 
 // Middleware verifies Bearer JWTs against the ManyRows install's
-// JWKS, stores the resulting user ID in request context, and 401s
-// any request that's missing or fails verification.
+// JWKS, checks the aud claim binds to this app, stores the resulting
+// user ID in request context, and 401s any request that's missing,
+// fails verification, or carries a token minted for a different app.
 //
-// workspaceSlug and appID are accepted but not currently used for
-// verification — kept in the signature for source-compat with the
-// previous /a/me-based middleware, and so a future audience check
-// has the values it needs without a breaking API change.
+// The aud check matters when two apps share an eTLD: cookies on the
+// parent domain ride to every subdomain, so without an explicit
+// audience boundary a prod token would be accepted by staging (and
+// vice-versa). The check parses the cookie's appID out of `aud` and
+// rejects anything that doesn't match the appID this middleware was
+// configured for.
 func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler) http.Handler {
-	v := newVerifier(manyrowsBaseURL)
+	v := newVerifier(manyrowsBaseURL, appID)
+	_ = workspaceSlug // reserved for future per-workspace checks
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			token := bearerToken(r)
+			token := bearerToken(r, appID)
 			if token == "" {
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
@@ -82,53 +86,59 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 				http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 				return
 			}
-			_ = workspaceSlug
-			_ = appID
 			ctx := context.WithValue(r.Context(), userIDKey, userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-// accessCookieName matches manyrows-core's clientauth.AccessCookieName().
+// accessCookiePrefix matches manyrows-core's clientauth.AccessCookieName(appID).
 // The SDK can't import that package (cyclic between manyrows-go and
-// manyrows-core), so the constant is duplicated here. Keep in sync if
-// the server-side name ever changes.
-const accessCookieName = "mr_at"
+// manyrows-core), so the convention is duplicated here. Keep in sync if
+// the server-side name ever changes. Full name is "mr_at_<appID>".
+const accessCookiePrefix = "mr_at_"
 
 // bearerToken returns the JWT to verify, picked from (in order):
 //  1. Authorization: Bearer <jwt>  — local/Tier-1 mode and any caller
 //     that forwards the SDK's Bearer header.
-//  2. mr_at cookie                 — cookie mode: the SDK uses HttpOnly
+//  2. mr_at_<appID> cookie         — cookie mode: the SDK uses HttpOnly
 //     cookies and never attaches a Bearer header. Browsers send the
 //     cookie on same-site requests automatically when the customer's
-//     auth host and app host share a registrable domain.
-func bearerToken(r *http.Request) string {
+//     auth host and app host share a registrable domain. The cookie
+//     name is per-app so two apps on the same eTLD don't overwrite
+//     each other.
+func bearerToken(r *http.Request, appID string) string {
 	h := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(h, "Bearer ") {
 		if t := strings.TrimSpace(h[7:]); t != "" {
 			return t
 		}
 	}
-	if c, err := r.Cookie(accessCookieName); err == nil && c != nil {
-		return strings.TrimSpace(c.Value)
+	if appID != "" {
+		if c, err := r.Cookie(accessCookiePrefix + appID); err == nil && c != nil {
+			return strings.TrimSpace(c.Value)
+		}
 	}
 	return ""
 }
 
 // verifier owns the JWKS cache and runs the local signature check.
 // One per Middleware instance so each (baseURL) keeps its own keys.
+// expectedAppID is the app this middleware was configured for; the
+// JWT's aud claim must contain it or the token is rejected.
 type verifier struct {
-	jwksURL string
+	jwksURL       string
+	expectedAppID string
 
 	mu        sync.RWMutex
 	keysByKID map[string]*ecdsa.PublicKey
 	fetchedAt time.Time
 }
 
-func newVerifier(manyrowsBaseURL string) *verifier {
+func newVerifier(manyrowsBaseURL, expectedAppID string) *verifier {
 	return &verifier{
-		jwksURL: strings.TrimRight(manyrowsBaseURL, "/") + "/.well-known/jwks.json",
+		jwksURL:       strings.TrimRight(manyrowsBaseURL, "/") + "/.well-known/jwks.json",
+		expectedAppID: expectedAppID,
 	}
 }
 
@@ -158,7 +168,35 @@ func (v *verifier) verify(ctx context.Context, token string) (string, error) {
 	if sub == "" {
 		return "", errors.New("missing sub claim")
 	}
+	// aud check: refuse tokens minted for a different app on this
+	// install. Catches the cross-app cookie ride-along between sibling
+	// subdomains (prod token reaching staging on the same eTLD). Empty
+	// expectedAppID is a permissive escape hatch for callers that just
+	// want signature-only verification — current Middleware always
+	// passes one through.
+	if v.expectedAppID != "" {
+		if !audMatches(claims["aud"], v.expectedAppID) {
+			return "", errors.New("aud claim does not match configured appID")
+		}
+	}
 	return sub, nil
+}
+
+// audMatches handles both shapes RFC 7519 allows for `aud`: a single
+// string or an array of strings. Matches when the configured appID
+// appears anywhere in the claim.
+func audMatches(raw interface{}, expected string) bool {
+	switch v := raw.(type) {
+	case string:
+		return v == expected
+	case []interface{}:
+		for _, x := range v {
+			if s, ok := x.(string); ok && s == expected {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // keyByKID returns the public key for the given kid, fetching JWKS
