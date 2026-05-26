@@ -1,301 +1,144 @@
 package manyrows
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
-func testServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *Client) {
+func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c := NewClient(srv.URL, "ws", "app1", "secret-key")
-	return srv, c
-}
-
-func TestNewClient_TrimsTrailingSlash(t *testing.T) {
-	c := NewClient("https://example.com/", "ws", "app1", "key")
-	if c.baseURL != "https://example.com" {
-		t.Fatalf("expected trailing slash trimmed, got %q", c.baseURL)
-	}
-}
-
-func TestApiURL(t *testing.T) {
-	c := NewClient("https://app.manyrows.com", "my-ws", "app123", "key")
-	got := c.apiURL("/check-permission")
-	want := "https://app.manyrows.com/x/my-ws/api/apps/app123/check-permission"
-	if got != want {
-		t.Fatalf("apiURL mismatch\n got: %s\nwant: %s", got, want)
-	}
-}
-
-func TestDoGet_SetsAPIKey(t *testing.T) {
-	var gotKey string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotKey = r.Header.Get("X-API-Key")
-		w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewClient(srv.URL, "ws", "app1", "my-secret")
-	c.doGet(srv.URL + "/test")
-
-	if gotKey != "my-secret" {
-		t.Fatalf("expected API key %q, got %q", "my-secret", gotKey)
-	}
-}
-
-func TestDoGet_SetsUserAgent(t *testing.T) {
-	var gotUA string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotUA = r.Header.Get("User-Agent")
-		w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewClient(srv.URL, "ws", "app1", "key")
-	c.doGet(srv.URL + "/test")
-
-	if gotUA == "" || gotUA == "Go-http-client/1.1" {
-		t.Errorf("User-Agent should be set to a custom value, got %q", gotUA)
-	}
-}
-
-func TestDoGet_NonOKStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte("forbidden"))
-	}))
-	t.Cleanup(srv.Close)
-
-	c := NewClient(srv.URL, "ws", "app1", "key")
-	_, err := c.doGet(srv.URL + "/test")
-	if err == nil {
-		t.Fatal("expected error for non-200 status")
-	}
-}
-
-func TestGetDelivery(t *testing.T) {
-	delivery := Delivery{
-		WorkspaceID: "ws-1",
-		ProjectID:   "proj-1",
-		AppID:       "app-1",
-		UpdatedAt:   "2025-01-01T00:00:00Z",
-	}
-	delivery.Config.Public = []ConfigItem{{Key: "site_name", Type: "string", Value: "Test"}}
-	delivery.Config.Private = []ConfigItem{{Key: "db_host", Type: "string", Value: "localhost"}}
-	delivery.Config.Secrets = []ConfigItem{{Key: "api_secret", Type: "string", IsSet: true}}
-	delivery.Flags.Client = []FeatureFlag{{Key: "dark_mode", Enabled: true}}
-	delivery.Flags.Server = []FeatureFlag{{Key: "new_pipeline", Enabled: false}}
-
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(delivery)
-	})
-
-	got, err := c.GetDelivery()
+	c, err := New(Options{BaseURL: srv.URL, Workspace: "acme", AppID: "app-1", APIKey: "mr_abc_secret"})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("New: %v", err)
 	}
-	if got.WorkspaceID != "ws-1" {
-		t.Errorf("WorkspaceID = %q, want %q", got.WorkspaceID, "ws-1")
-	}
-	if len(got.Config.Public) != 1 || got.Config.Public[0].Key != "site_name" {
-		t.Errorf("unexpected public config: %+v", got.Config.Public)
-	}
-	if len(got.Flags.Client) != 1 || !got.Flags.Client[0].Enabled {
-		t.Errorf("unexpected client flags: %+v", got.Flags.Client)
-	}
-	if len(got.Flags.Server) != 1 || got.Flags.Server[0].Enabled {
-		t.Errorf("unexpected server flags: %+v", got.Flags.Server)
-	}
+	return c
 }
 
-func TestGetDelivery_BadJSON(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`not json`))
+func TestCheckPermission_BuildsRequest(t *testing.T) {
+	var gotPath, gotKey, gotQuery string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotKey, gotQuery = r.URL.Path, r.Header.Get("X-API-Key"), r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": true, "permission": "posts:read", "accountId": "u1"})
 	})
 
-	_, err := c.GetDelivery()
-	if err == nil {
-		t.Fatal("expected error for bad JSON")
-	}
-}
-
-func TestCheckPermission(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("accountId") != "user-42" {
-			t.Errorf("unexpected accountId: %s", r.URL.Query().Get("accountId"))
-		}
-		if r.URL.Query().Get("permission") != "admin.edit" {
-			t.Errorf("unexpected permission: %s", r.URL.Query().Get("permission"))
-		}
-		json.NewEncoder(w).Encode(PermissionResult{
-			Allowed:    true,
-			Permission: "admin.edit",
-			AccountID:  "user-42",
-		})
-	})
-
-	got, err := c.CheckPermission("user-42", "admin.edit")
+	res, err := c.CheckPermission(context.Background(), "u1", "posts:read")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("CheckPermission: %v", err)
 	}
-	if !got.Allowed {
-		t.Error("expected Allowed=true")
+	if !res.Allowed {
+		t.Fatal("expected allowed=true")
 	}
-	if got.AccountID != "user-42" {
-		t.Errorf("AccountID = %q, want %q", got.AccountID, "user-42")
+	if gotPath != "/x/acme/api/v1/apps/app-1/check-permission" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotKey != "mr_abc_secret" {
+		t.Fatalf("X-API-Key = %q", gotKey)
+	}
+	if !strings.Contains(gotQuery, "accountId=u1") || !strings.Contains(gotQuery, "permission=posts") {
+		t.Fatalf("query = %q", gotQuery)
 	}
 }
 
-func TestHasPermission(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(PermissionResult{Allowed: false})
+func TestHasPermission_ReturnsBool(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": false, "permission": "posts:delete", "accountId": "u1"})
 	})
 
-	allowed, err := c.HasPermission("user-1", "delete")
+	allowed, err := c.HasPermission(context.Background(), "u1", "posts:delete")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("HasPermission: %v", err)
 	}
 	if allowed {
-		t.Error("expected allowed=false")
+		t.Fatal("expected allowed=false")
 	}
 }
 
-func TestListMembers(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("page") != "1" {
-			t.Errorf("unexpected page: %s", r.URL.Query().Get("page"))
-		}
-		if r.URL.Query().Get("pageSize") != "10" {
-			t.Errorf("unexpected pageSize: %s", r.URL.Query().Get("pageSize"))
-		}
-		json.NewEncoder(w).Encode(MembersResult{
-			Members:  []Member{{UserID: "u1", Email: "a@b.com", Enabled: true, Roles: []string{"admin"}}},
-			Total:    1,
-			Page:     1,
-			PageSize: 10,
+func TestCreateUser_PostsBody(t *testing.T) {
+	var gotMethod string
+	var gotBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"user": map[string]any{"id": "u2", "email": "a@b.com"}, "created": true, "roles": []string{"editor"},
 		})
 	})
 
-	got, err := c.ListMembers(1, 10)
+	res, err := c.CreateUser(context.Background(), CreateUserInput{Email: "a@b.com", Roles: []string{"editor"}})
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("CreateUser: %v", err)
 	}
-	if got.Total != 1 {
-		t.Errorf("Total = %d, want 1", got.Total)
+	if !res.Created || res.User.ID != "u2" {
+		t.Fatalf("result = %+v", res)
 	}
-	if got.Members[0].Email != "a@b.com" {
-		t.Errorf("Email = %q, want %q", got.Members[0].Email, "a@b.com")
+	if gotMethod != http.MethodPost {
+		t.Fatalf("method = %q", gotMethod)
+	}
+	if gotBody["email"] != "a@b.com" {
+		t.Fatalf("body = %+v", gotBody)
 	}
 }
 
-func TestListMembersByEmail(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("email") != "test@example.com" {
-			t.Errorf("unexpected email filter: %s", r.URL.Query().Get("email"))
+func TestNon2xx_ReturnsTypedError(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "error.notFound", "message": "Not found"})
+	})
+
+	_, err := c.GetUser(context.Background(), "missing")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *manyrows.Error, got %T: %v", err, err)
+	}
+	if apiErr.Status != 404 || apiErr.Code != "error.notFound" || apiErr.Message != "Not found" {
+		t.Fatalf("error = %+v", apiErr)
+	}
+}
+
+func TestDeleteUserFieldValue_NoContent(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			t.Errorf("method = %q", r.Method)
 		}
-		json.NewEncoder(w).Encode(MembersResult{
-			Members: []Member{{UserID: "u2", Email: "test@example.com"}},
-			Total:   1, Page: 1, PageSize: 10,
-		})
-	})
-
-	got, err := c.ListMembersByEmail("test@example.com", 1, 10)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(got.Members) != 1 {
-		t.Fatalf("expected 1 member, got %d", len(got.Members))
-	}
-}
-
-func TestGetUser(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("id") != "user-99" {
-			t.Errorf("unexpected id: %s", r.URL.Query().Get("id"))
+		if !strings.HasSuffix(r.URL.Path, "/user-fields/f1/users/u1") {
+			t.Errorf("path = %q", r.URL.Path)
 		}
-		json.NewEncoder(w).Encode(UserResult{
-			User:        User{ID: "user-99", Email: "u@test.com", Enabled: true, Source: "email"},
-			Roles:       []string{"viewer"},
-			Permissions: []string{"read"},
-			Fields:      []UserFieldValue{{ID: "f1", UserFieldID: "uf1", Value: "val"}},
-		})
+		w.WriteHeader(http.StatusNoContent)
 	})
 
-	got, err := c.GetUser("user-99")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got.User.ID != "user-99" {
-		t.Errorf("User.ID = %q, want %q", got.User.ID, "user-99")
-	}
-	if len(got.Roles) != 1 || got.Roles[0] != "viewer" {
-		t.Errorf("unexpected roles: %v", got.Roles)
+	if err := c.DeleteUserFieldValue(context.Background(), "f1", "u1"); err != nil {
+		t.Fatalf("DeleteUserFieldValue: %v", err)
 	}
 }
 
-func TestGetUserByEmail(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("email") != "hello@world.com" {
-			t.Errorf("unexpected email: %s", r.URL.Query().Get("email"))
-		}
-		json.NewEncoder(w).Encode(UserResult{
-			User: User{ID: "user-7", Email: "hello@world.com"},
-		})
+func TestListUsers_OmitsZeroParams(t *testing.T) {
+	var gotQuery string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{"members": []any{}, "total": 0, "page": 0, "pageSize": 50})
 	})
 
-	got, err := c.GetUserByEmail("hello@world.com")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if _, err := c.ListUsers(context.Background(), ListUsersParams{Search: "ali"}); err != nil {
+		t.Fatalf("ListUsers: %v", err)
 	}
-	if got.User.Email != "hello@world.com" {
-		t.Errorf("Email = %q, want %q", got.User.Email, "hello@world.com")
+	if gotQuery != "search=ali" {
+		t.Fatalf("query = %q (page/pageSize should be omitted)", gotQuery)
 	}
 }
 
-func TestListUserFields(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"userFields": []UserField{
-				{ID: "uf1", Key: "company", ValueType: "string", Label: "Company", Status: "active"},
-				{ID: "uf2", Key: "age", ValueType: "number", Status: "active"},
-			},
-		})
-	})
-
-	got, err := c.ListUserFields()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestNew_Validation(t *testing.T) {
+	if _, err := New(Options{Workspace: "a", AppID: "b", APIKey: "c"}); err == nil {
+		t.Fatal("expected error for missing BaseURL")
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 fields, got %d", len(got))
-	}
-	if got[0].Key != "company" {
-		t.Errorf("first field key = %q, want %q", got[0].Key, "company")
-	}
-}
-
-func TestServerError(t *testing.T) {
-	_, c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
-	})
-
-	_, err := c.GetDelivery()
-	if err == nil {
-		t.Fatal("expected error for 500 response")
-	}
-
-	_, err = c.CheckPermission("u", "p")
-	if err == nil {
-		t.Fatal("expected error for 500 response")
-	}
-
-	_, err = c.ListMembers(1, 10)
-	if err == nil {
-		t.Fatal("expected error for 500 response")
+	if _, err := New(Options{BaseURL: "x", Workspace: "a", AppID: "b"}); err == nil {
+		t.Fatal("expected error for missing APIKey")
 	}
 }

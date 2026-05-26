@@ -15,9 +15,9 @@
 //	// it into source control.
 //	var privateKeyJWK = []byte(`{"kty":"EC","crv":"P-256","x":"...","y":"...","d":"..."}`)
 //
-//	delivery, _ := client.GetDelivery()
+//	delivery, _ := client.GetDelivery(ctx)
 //	for _, sec := range delivery.Config.Secrets {
-//	    if !sec.IsSet || len(sec.Envelope) == 0 {
+//	    if sec.IsSet == nil || !*sec.IsSet || len(sec.Envelope) == 0 {
 //	        continue
 //	    }
 //	    plaintext, err := secrets.Decrypt(sec.Envelope, privateKeyJWK)
