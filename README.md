@@ -15,23 +15,44 @@ go get github.com/manyrows/manyrows-go
 
 ## Client
 
-The client wraps the ManyRows Server API. Requires an API key.
+The client wraps the ManyRows server-to-server API: the full admin surface
+(users, roles, permissions, sessions, passkeys, webhooks, config keys, feature
+flags, auth logs, and more). Every call is scoped to one app and authenticated
+with a workspace API key. Methods take a `context.Context`.
 
 ```go
-import manyrows "github.com/manyrows/manyrows-go"
+import (
+    "context"
+    "os"
 
-client := manyrows.NewClient(
-    "https://manyrows.example.com", // base URL of your install
-    "your-workspace",               // workspace slug
-    "your-app-id",                  // app ID
-    "mr_a1b2c3d4_yourSecretKey",    // API key
+    manyrows "github.com/manyrows/manyrows-go"
 )
+
+client, err := manyrows.New(manyrows.Options{
+    BaseURL:   "https://manyrows.example.com",        // base URL of your install
+    Workspace: "your-workspace",                      // workspace slug
+    AppID:     "your-app-id",                         // app ID
+    APIKey:    os.Getenv("MANYROWS_API_KEY"),         // server API key ("mr_<prefix>_<secret>")
+})
+if err != nil {
+    // missing required option
+}
+```
+
+Any non-2xx response is returned as a typed `*manyrows.Error` carrying the HTTP
+status and the API's stable error code:
+
+```go
+var apiErr *manyrows.Error
+if errors.As(err, &apiErr) && apiErr.Status == 404 {
+    // not found
+}
 ```
 
 ### Delivery (config + feature flags)
 
 ```go
-delivery, err := client.GetDelivery()
+delivery, err := client.GetDelivery(context.Background())
 // delivery.Config.Public, delivery.Config.Private, delivery.Config.Secrets
 // delivery.Flags.Client, delivery.Flags.Server
 ```
@@ -53,7 +74,7 @@ import (
 privateKeyJWK := []byte(os.Getenv("MANYROWS_WORKSPACE_PRIVATE_KEY"))
 
 for _, sec := range delivery.Config.Secrets {
-    if !sec.IsSet || len(sec.Envelope) == 0 {
+    if sec.IsSet == nil || !*sec.IsSet || len(sec.Envelope) == 0 {
         continue
     }
     plaintext, err := secrets.Decrypt(sec.Envelope, privateKeyJWK)
@@ -75,10 +96,10 @@ and never has access to the plaintext.
 ### Check permission
 
 ```go
-allowed, err := client.HasPermission(userID, "posts:edit")
+allowed, err := client.HasPermission(ctx, userID, "posts:edit")
 
 // Or get the full result:
-result, err := client.CheckPermission(userID, "posts:edit")
+result, err := client.CheckPermission(ctx, userID, "posts:edit")
 // result.Allowed, result.Permission, result.AccountID
 ```
 
@@ -86,27 +107,68 @@ result, err := client.CheckPermission(userID, "posts:edit")
 
 ```go
 // By ID
-user, err := client.GetUser(userID)
+user, err := client.GetUser(ctx, userID)
 // user.User.Email, user.Roles, user.Permissions, user.Fields
 
 // By email
-user, err := client.GetUserByEmail("user@example.com")
+user, err := client.GetUserByEmail(ctx, "user@example.com")
 ```
 
 ### Members
 
 ```go
-result, err := client.ListMembers(0, 50)
+result, err := client.ListUsers(ctx, manyrows.ListUsersParams{Page: 1, PageSize: 50})
 // result.Members, result.Total, result.Page, result.PageSize
 
-// Filter by email
-result, err := client.ListMembersByEmail("alice", 0, 50)
+// Filter by email substring
+result, err := client.ListUsers(ctx, manyrows.ListUsersParams{Search: "alice"})
+```
+
+### Managing users
+
+Provision, suspend, and remove members; manage their roles, permissions,
+sessions, passwords, identities, and passkeys:
+
+```go
+created, err := client.CreateUser(ctx, manyrows.CreateUserInput{
+    Email: "new@example.com",
+    Roles: []string{"editor"},
+})
+
+roles, err := client.ReplaceUserRoles(ctx, userID, []string{"admin"})
+err = client.SetUserPassword(ctx, userID, "s3cret-passphrase")
+revoked, err := client.RevokeUserSessions(ctx, userID)
+err = client.ResetUserTOTP(ctx, userID)
+```
+
+### Roles, permissions, config keys & feature flags
+
+Full CRUD for the product's roles, permissions, config-key definitions, and
+feature-flag definitions, plus per-app config values and flag overrides:
+
+```go
+roles, err := client.ListRoles(ctx)
+perms, err := client.ListPermissions(ctx)
+err = client.SetConfigValue(ctx, "max_seats", 25)
+ov, err := client.SetFeatureFlagOverride(ctx, "new_billing", true, []string{"beta"})
+```
+
+### Webhooks & auth logs
+
+```go
+hook, err := client.CreateWebhook(ctx, manyrows.WebhookInput{
+    URL:    "https://example.com/webhooks/manyrows",
+    Events: []string{"user.created"},
+})
+// hook.Secret is populated only on create — store it.
+
+page, err := client.ListAuthLogs(ctx, manyrows.AuthLogsParams{Outcome: "failure"})
 ```
 
 ### User fields
 
 ```go
-fields, err := client.ListUserFields()
+fields, err := client.ListUserFields(ctx)
 // fields[0].Key, fields[0].ValueType, fields[0].Label
 ```
 
@@ -172,12 +234,15 @@ import (
 )
 
 func main() {
-    client := manyrows.NewClient(
-        "https://manyrows.example.com",
-        "my-workspace",
-        "my-app-id",
-        os.Getenv("MANYROWS_API_KEY"),
-    )
+    client, err := manyrows.New(manyrows.Options{
+        BaseURL:   "https://manyrows.example.com",
+        Workspace: "my-workspace",
+        AppID:     "my-app-id",
+        APIKey:    os.Getenv("MANYROWS_API_KEY"),
+    })
+    if err != nil {
+        panic(err)
+    }
 
     mux := http.NewServeMux()
 
@@ -187,7 +252,7 @@ func main() {
         userID := auth.MustUserID(r.Context())
 
         // Look up user details from ManyRows
-        user, err := client.GetUser(userID)
+        user, err := client.GetUser(r.Context(), userID)
         if err != nil {
             http.Error(w, "Failed to get user", 500)
             return
@@ -199,7 +264,7 @@ func main() {
     protected.HandleFunc("/api/admin", func(w http.ResponseWriter, r *http.Request) {
         userID := auth.MustUserID(r.Context())
 
-        allowed, _ := client.HasPermission(userID, "admin:access")
+        allowed, _ := client.HasPermission(r.Context(), userID, "admin:access")
         if !allowed {
             http.Error(w, "Forbidden", 403)
             return
