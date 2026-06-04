@@ -5,8 +5,8 @@
 //
 //	import (
 //	    "encoding/json"
-//	    manyrows "github.com/manyrows/manyrows-go"
-//	    "github.com/manyrows/manyrows-go/secrets"
+//	    manyrows "github.com/manyrows/manyrows-auth-go"
+//	    "github.com/manyrows/manyrows-auth-go/secrets"
 //	)
 //
 //	// Load your workspace private key once at startup. It's the JWK

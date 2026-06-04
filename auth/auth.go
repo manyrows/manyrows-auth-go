@@ -79,7 +79,7 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 	// immediately, not a runtime 5xx after deploy. Localhost stays
 	// allowed so dev loops aren't blocked.
 	if err := requireSecureBaseURL(manyrowsBaseURL); err != nil {
-		panic("manyrows-go auth: " + err.Error())
+		panic("manyrows-auth-go auth: " + err.Error())
 	}
 	v := newVerifier(manyrowsBaseURL, appID)
 	_ = workspaceSlug // reserved for future per-workspace checks
@@ -104,7 +104,7 @@ func Middleware(manyrowsBaseURL, workspaceSlug, appID string) func(http.Handler)
 }
 
 // accessCookiePrefix matches manyrows-core's clientauth.AccessCookieName(appID).
-// The SDK can't import that package (cyclic between manyrows-go and
+// The SDK can't import that package (cyclic between manyrows-auth-go and
 // manyrows-core), so the convention is duplicated here. Keep in sync if
 // the server-side name ever changes. Full name is "mr_at_<appID>".
 const accessCookiePrefix = "mr_at_"
@@ -299,7 +299,7 @@ func (v *verifier) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "manyrows-go-auth/1.0")
+	req.Header.Set("User-Agent", "manyrows-auth-go/1.0")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("jwks fetch: %w", err)

@@ -1,4 +1,4 @@
-# manyrows-go
+# manyrows-auth-go
 
 Go libraries for integrating with a [ManyRows](https://manyrows.com) install.
 
@@ -10,7 +10,7 @@ domain in production).
 ## Install
 
 ```bash
-go get github.com/manyrows/manyrows-go
+go get github.com/manyrows/manyrows-auth-go
 ```
 
 ## Client
@@ -25,7 +25,7 @@ import (
     "context"
     "os"
 
-    manyrows "github.com/manyrows/manyrows-go"
+    manyrows "github.com/manyrows/manyrows-auth-go"
 )
 
 client, err := manyrows.New(manyrows.Options{
@@ -67,7 +67,7 @@ the keypair in your install's admin UI) to decrypt server-side:
 ```go
 import (
     "encoding/json"
-    "github.com/manyrows/manyrows-go/secrets"
+    "github.com/manyrows/manyrows-auth-go/secrets"
 )
 
 // Load once at startup from a secret manager / env var. Never commit it.
@@ -182,7 +182,7 @@ mismatch — no per-request round trip to ManyRows. Falls back to the
 present (cookie-mode AppKit deploys).
 
 ```go
-import "github.com/manyrows/manyrows-go/auth"
+import "github.com/manyrows/manyrows-auth-go/auth"
 ```
 
 ### Middleware
@@ -229,8 +229,8 @@ import (
     "net/http"
     "os"
 
-    manyrows "github.com/manyrows/manyrows-go"
-    "github.com/manyrows/manyrows-go/auth"
+    manyrows "github.com/manyrows/manyrows-auth-go"
+    "github.com/manyrows/manyrows-auth-go/auth"
 )
 
 func main() {
@@ -289,7 +289,7 @@ ManyRows signs every outbound webhook delivery. Use the `webhook`
 package to verify the signature + timestamp on your receiver:
 
 ```go
-import "github.com/manyrows/manyrows-go/webhook"
+import "github.com/manyrows/manyrows-auth-go/webhook"
 
 http.HandleFunc("/webhooks/manyrows", func(w http.ResponseWriter, r *http.Request) {
     body, err := io.ReadAll(r.Body)

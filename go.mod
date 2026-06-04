@@ -1,4 +1,4 @@
-module github.com/manyrows/manyrows-go
+module github.com/manyrows/manyrows-auth-go
 
 go 1.26.3
 
