@@ -201,6 +201,11 @@ func TestUpdateAndDeleteOrganization(t *testing.T) {
 		case http.MethodPatch:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "o1", "appId": "app-1", "name": "Renamed", "slug": "acme", "status": "active"})
 		case http.MethodDelete:
+			// Owner-only delete: the acting end-user must be carried as a query
+			// param so the auth server can verify their tier.
+			if got := r.URL.Query().Get("actorUserId"); got != "actor-1" {
+				t.Errorf("delete actorUserId = %q, want actor-1", got)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
@@ -209,7 +214,7 @@ func TestUpdateAndDeleteOrganization(t *testing.T) {
 	if err != nil || org.Name != "Renamed" {
 		t.Fatalf("update: %+v %v", org, err)
 	}
-	if err := c.DeleteOrganization(context.Background(), "o1"); err != nil {
+	if err := c.DeleteOrganization(context.Background(), "o1", "actor-1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 }

@@ -1100,8 +1100,12 @@ func (c *Client) UpdateOrganization(ctx context.Context, orgID string, in Update
 	return &out, c.do(ctx, http.MethodPatch, "/organizations/"+url.PathEscape(orgID), nil, body, &out)
 }
 
-func (c *Client) DeleteOrganization(ctx context.Context, orgID string) error {
-	return c.do(ctx, http.MethodDelete, "/organizations/"+url.PathEscape(orgID), nil, nil, nil)
+// DeleteOrganization hard-deletes an org. The auth server enforces owner-only
+// deletion: actorUserID names the acting end-user, who must be an active owner
+// of the org, or the call is rejected (400 if empty, 403 if not an owner).
+func (c *Client) DeleteOrganization(ctx context.Context, orgID, actorUserID string) error {
+	q := url.Values{"actorUserId": {actorUserID}}
+	return c.do(ctx, http.MethodDelete, "/organizations/"+url.PathEscape(orgID), q, nil, nil)
 }
 
 // ---- Organization members ----
