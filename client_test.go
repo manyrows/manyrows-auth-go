@@ -142,3 +142,74 @@ func TestNew_Validation(t *testing.T) {
 		t.Fatal("expected error for missing APIKey")
 	}
 }
+
+func TestCreateOrganization_PostsBody(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "o1", "appId": "app-1", "name": "Acme", "slug": "acme", "status": "active", "createdAt": "2026-06-07T00:00:00Z"})
+	})
+	org, err := c.CreateOrganization(context.Background(), CreateOrganizationInput{Name: "Acme", OwnerUserID: "u1"})
+	if err != nil {
+		t.Fatalf("CreateOrganization: %v", err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/x/acme/api/v1/apps/app-1/organizations" {
+		t.Fatalf("method/path = %s %s", gotMethod, gotPath)
+	}
+	if gotBody["name"] != "Acme" || gotBody["ownerUserId"] != "u1" {
+		t.Fatalf("body = %+v", gotBody)
+	}
+	if org.ID != "o1" || org.Status != "active" {
+		t.Fatalf("org = %+v", org)
+	}
+}
+
+func TestListOrganizationsForUser_Query(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/acme/api/v1/apps/app-1/organizations" || r.URL.Query().Get("userId") != "u1" {
+			t.Errorf("path/query = %s ?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"organizations": []map[string]any{{"id": "o1", "name": "Acme", "slug": "acme", "orgRole": "owner"}}})
+	})
+	orgs, err := c.ListOrganizationsForUser(context.Background(), "u1")
+	if err != nil || len(orgs) != 1 || orgs[0].OrgRole != "owner" {
+		t.Fatalf("orgs = %+v err = %v", orgs, err)
+	}
+}
+
+func TestGetOrganization_NotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "error.notFound"})
+	})
+	_, err := c.GetOrganization(context.Background(), "o1")
+	if !IsCode(err, CodeNotFound) {
+		t.Fatalf("expected CodeNotFound, got %v", err)
+	}
+	var e *Error
+	if !errors.As(err, &e) || e.Status != http.StatusNotFound {
+		t.Fatalf("expected *Error 404, got %v", err)
+	}
+}
+
+func TestUpdateAndDeleteOrganization(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPatch:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "o1", "appId": "app-1", "name": "Renamed", "slug": "acme", "status": "active"})
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	name := "Renamed"
+	org, err := c.UpdateOrganization(context.Background(), "o1", UpdateOrganizationInput{Name: &name})
+	if err != nil || org.Name != "Renamed" {
+		t.Fatalf("update: %+v %v", org, err)
+	}
+	if err := c.DeleteOrganization(context.Background(), "o1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+}

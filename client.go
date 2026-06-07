@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,6 +84,20 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("manyrows: %d %s", e.Status, e.Code)
 }
 
+// Stable API error codes (the Code field of *Error) for the org endpoints.
+const (
+	CodeUserNotSignedIn = "error.userNotSignedIn"
+	CodeInvitePending   = "error.invitePending"
+	CodeConflict        = "error.conflict"
+	CodeNotFound        = "error.notFound"
+)
+
+// IsCode reports whether err is a *Error carrying the given API code.
+func IsCode(err error, code string) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Code == code
+}
+
 // ---- types ----
 
 type User struct {
@@ -130,6 +145,66 @@ type MembersList struct {
 	Total    int      `json:"total"`
 	Page     int      `json:"page"`
 	PageSize int      `json:"pageSize"`
+}
+
+// Organization is an app-scoped tenant.
+type Organization struct {
+	ID        string `json:"id"`
+	AppID     string `json:"appId"`
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+}
+
+// OrgMembership is one of a user's organizations + their tier (ListOrganizationsForUser).
+type OrgMembership struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Slug    string `json:"slug"`
+	OrgRole string `json:"orgRole"`
+}
+
+// OrgMember is a member of an organization. Email is populated by the member
+// list/add responses; the lightweight membership gate omits it.
+type OrgMember struct {
+	UserID  string `json:"userId"`
+	Email   string `json:"email"`
+	OrgRole string `json:"orgRole"`
+	Status  string `json:"status"`
+}
+
+// OrgInvite is a pending organization invitation.
+type OrgInvite struct {
+	ID             string  `json:"id"`
+	Email          string  `json:"email"`
+	OrgRole        string  `json:"orgRole"`
+	Status         string  `json:"status"`
+	InvitedByEmail *string `json:"invitedByEmail,omitempty"`
+	CreatedAt      string  `json:"createdAt"`
+	ExpiresAt      string  `json:"expiresAt"`
+}
+
+// Inputs.
+type CreateOrganizationInput struct {
+	Name        string
+	Slug        string
+	OwnerUserID string
+}
+type UpdateOrganizationInput struct {
+	Name *string
+	Slug *string
+}
+type AddOrgMemberInput struct {
+	UserID  string
+	Email   string
+	OrgRole string
+}
+type CreateOrgInviteInput struct {
+	Email           string
+	OrgRole         string
+	RoleIDs         []string
+	InvitedByUserID string
 }
 
 type CheckPermissionResult struct {
@@ -988,4 +1063,43 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return fmt.Errorf("manyrows: decode response: %w", err)
 	}
 	return nil
+}
+
+// ---- Organizations ----
+
+func (c *Client) CreateOrganization(ctx context.Context, in CreateOrganizationInput) (*Organization, error) {
+	body := map[string]any{"name": in.Name, "ownerUserId": in.OwnerUserID}
+	if in.Slug != "" {
+		body["slug"] = in.Slug
+	}
+	var out Organization
+	return &out, c.do(ctx, http.MethodPost, "/organizations", nil, body, &out)
+}
+
+func (c *Client) ListOrganizationsForUser(ctx context.Context, userID string) ([]OrgMembership, error) {
+	var out struct {
+		Organizations []OrgMembership `json:"organizations"`
+	}
+	return out.Organizations, c.do(ctx, http.MethodGet, "/organizations", url.Values{"userId": {userID}}, nil, &out)
+}
+
+func (c *Client) GetOrganization(ctx context.Context, orgID string) (*Organization, error) {
+	var out Organization
+	return &out, c.do(ctx, http.MethodGet, "/organizations/"+url.PathEscape(orgID), nil, nil, &out)
+}
+
+func (c *Client) UpdateOrganization(ctx context.Context, orgID string, in UpdateOrganizationInput) (*Organization, error) {
+	body := map[string]any{}
+	if in.Name != nil {
+		body["name"] = *in.Name
+	}
+	if in.Slug != nil {
+		body["slug"] = *in.Slug
+	}
+	var out Organization
+	return &out, c.do(ctx, http.MethodPatch, "/organizations/"+url.PathEscape(orgID), nil, body, &out)
+}
+
+func (c *Client) DeleteOrganization(ctx context.Context, orgID string) error {
+	return c.do(ctx, http.MethodDelete, "/organizations/"+url.PathEscape(orgID), nil, nil, nil)
 }
