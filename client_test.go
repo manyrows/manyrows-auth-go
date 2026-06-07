@@ -213,3 +213,59 @@ func TestUpdateAndDeleteOrganization(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 }
+
+func TestAddOrganizationMember_ByEmail_NotSignedIn(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/acme/api/v1/apps/app-1/organizations/o1/members" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "error.userNotSignedIn"})
+	})
+	_, err := c.AddOrganizationMember(context.Background(), "o1", AddOrgMemberInput{Email: "x@y.com", OrgRole: "admin"})
+	if !IsCode(err, CodeUserNotSignedIn) {
+		t.Fatalf("expected CodeUserNotSignedIn, got %v", err)
+	}
+}
+
+func TestAddOrganizationMember_Success(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"userId": "u2", "email": "x@y.com", "orgRole": "admin", "status": "active"})
+	})
+	m, err := c.AddOrganizationMember(context.Background(), "o1", AddOrgMemberInput{Email: "x@y.com", OrgRole: "admin"})
+	if err != nil || m.UserID != "u2" || m.OrgRole != "admin" {
+		t.Fatalf("member = %+v err = %v", m, err)
+	}
+}
+
+func TestListGetOrganizationMembers(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/members/u2") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"userId": "u2", "orgRole": "admin", "status": "active"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"members": []map[string]any{{"userId": "u2", "email": "x@y.com", "orgRole": "admin", "status": "active"}}})
+	})
+	list, err := c.ListOrganizationMembers(context.Background(), "o1")
+	if err != nil || len(list) != 1 || list[0].Email != "x@y.com" {
+		t.Fatalf("list = %+v err = %v", list, err)
+	}
+	m, err := c.GetOrganizationMember(context.Background(), "o1", "u2")
+	if err != nil || m.OrgRole != "admin" {
+		t.Fatalf("get = %+v err = %v", m, err)
+	}
+}
+
+func TestSetAndRemoveOrganizationMember_LastOwner(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "error.conflict"})
+	})
+	if err := c.SetOrganizationMemberRole(context.Background(), "o1", "u2", "member"); !IsCode(err, CodeConflict) {
+		t.Fatalf("set: expected CodeConflict, got %v", err)
+	}
+	if err := c.RemoveOrganizationMember(context.Background(), "o1", "u2"); !IsCode(err, CodeConflict) {
+		t.Fatalf("remove: expected CodeConflict, got %v", err)
+	}
+}
