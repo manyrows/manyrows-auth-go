@@ -269,3 +269,50 @@ func TestSetAndRemoveOrganizationMember_LastOwner(t *testing.T) {
 		t.Fatalf("remove: expected CodeConflict, got %v", err)
 	}
 }
+
+func TestCreateOrganizationInvite_PostsBody(t *testing.T) {
+	var gotBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x/acme/api/v1/apps/app-1/organizations/o1/invites" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "i1", "email": "x@y.com", "orgRole": "admin", "status": "pending", "createdAt": "t", "expiresAt": "t2"})
+	})
+	inv, err := c.CreateOrganizationInvite(context.Background(), "o1", CreateOrgInviteInput{Email: "x@y.com", OrgRole: "admin", InvitedByUserID: "u1"})
+	if err != nil || inv.ID != "i1" || inv.Status != "pending" {
+		t.Fatalf("inv = %+v err = %v", inv, err)
+	}
+	if gotBody["email"] != "x@y.com" || gotBody["invitedByUserId"] != "u1" {
+		t.Fatalf("body = %+v", gotBody)
+	}
+}
+
+func TestCreateOrganizationInvite_DuplicatePending(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "error.invitePending"})
+	})
+	_, err := c.CreateOrganizationInvite(context.Background(), "o1", CreateOrgInviteInput{Email: "x@y.com"})
+	if !IsCode(err, CodeInvitePending) {
+		t.Fatalf("expected CodeInvitePending, got %v", err)
+	}
+}
+
+func TestListAndRevokeOrganizationInvites(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"invites": []map[string]any{{"id": "i1", "email": "x@y.com", "orgRole": "admin", "status": "pending", "createdAt": "t", "expiresAt": "t2"}}})
+	})
+	list, err := c.ListOrganizationInvites(context.Background(), "o1")
+	if err != nil || len(list) != 1 || list[0].Email != "x@y.com" {
+		t.Fatalf("list = %+v err = %v", list, err)
+	}
+	if err := c.RevokeOrganizationInvite(context.Background(), "o1", "i1"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+}

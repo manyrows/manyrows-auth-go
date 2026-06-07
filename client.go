@@ -1137,3 +1137,31 @@ func (c *Client) SetOrganizationMemberRole(ctx context.Context, orgID, userID, o
 func (c *Client) RemoveOrganizationMember(ctx context.Context, orgID, userID string) error {
 	return c.do(ctx, http.MethodDelete, "/organizations/"+url.PathEscape(orgID)+"/members/"+url.PathEscape(userID), nil, nil, nil)
 }
+
+// ---- Organization invites ----
+
+func (c *Client) CreateOrganizationInvite(ctx context.Context, orgID string, in CreateOrgInviteInput) (*OrgInvite, error) {
+	body := map[string]any{"email": in.Email}
+	if in.OrgRole != "" {
+		body["orgRole"] = in.OrgRole
+	}
+	if len(in.RoleIDs) > 0 {
+		body["roleIds"] = in.RoleIDs
+	}
+	if in.InvitedByUserID != "" {
+		body["invitedByUserId"] = in.InvitedByUserID
+	}
+	var out OrgInvite
+	return &out, c.do(ctx, http.MethodPost, "/organizations/"+url.PathEscape(orgID)+"/invites", nil, body, &out)
+}
+
+func (c *Client) ListOrganizationInvites(ctx context.Context, orgID string) ([]OrgInvite, error) {
+	var out struct {
+		Invites []OrgInvite `json:"invites"`
+	}
+	return out.Invites, c.do(ctx, http.MethodGet, "/organizations/"+url.PathEscape(orgID)+"/invites", nil, nil, &out)
+}
+
+func (c *Client) RevokeOrganizationInvite(ctx context.Context, orgID, inviteID string) error {
+	return c.do(ctx, http.MethodDelete, "/organizations/"+url.PathEscape(orgID)+"/invites/"+url.PathEscape(inviteID), nil, nil, nil)
+}
