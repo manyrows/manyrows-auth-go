@@ -27,6 +27,14 @@ import (
 	"time"
 )
 
+// Version is the SDK version, sent as the User-Agent on every request so the
+// server (and any proxy/WAF in front of it) can identify the client rather than
+// treating it as an anonymous bot. Keep in sync with the released git tag.
+const Version = "1.6.0"
+
+// userAgent is sent on every request.
+const userAgent = "manyrows-auth-go/" + Version
+
 // Options configures a Client.
 type Options struct {
 	// BaseURL of your ManyRows host, e.g. "https://auth.example.com".
@@ -1027,6 +1035,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

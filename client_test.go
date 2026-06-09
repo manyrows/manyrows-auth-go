@@ -21,6 +21,20 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	return c
 }
 
+func TestRequest_SetsUserAgent(t *testing.T) {
+	var gotUA string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": true, "permission": "p", "accountId": "u1"})
+	})
+	if _, err := c.CheckPermission(context.Background(), "u1", "p"); err != nil {
+		t.Fatalf("CheckPermission: %v", err)
+	}
+	if !strings.HasPrefix(gotUA, "manyrows-auth-go/") {
+		t.Fatalf("User-Agent = %q, want prefix \"manyrows-auth-go/\"", gotUA)
+	}
+}
+
 func TestCheckPermission_BuildsRequest(t *testing.T) {
 	var gotPath, gotKey, gotQuery string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
